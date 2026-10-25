@@ -1752,10 +1752,10 @@ index d1eca59..0000000
 -    }
 -}
 diff --git a/app/src/main/java/com/techpp/glass/Trending.java b/app/src/main/java/com/techpp/glass/Trending.java
-index f90fdbc..ebdf2b6 100644
+index f90fdbc..52a1812 100644
 --- a/app/src/main/java/com/techpp/glass/Trending.java
 +++ b/app/src/main/java/com/techpp/glass/Trending.java
-@@ -21,76 +21,81 @@ import java.net.HttpURLConnection;
+@@ -21,76 +21,82 @@ import java.net.HttpURLConnection;
  import java.net.URL;
  import java.nio.charset.StandardCharsets;
  import java.util.ArrayList;
@@ -1784,7 +1784,7 @@ index f90fdbc..ebdf2b6 100644
 + *   Filmy nové        catalog/movie/year
 + *   Seriály populární catalog/series/top
 + *   Seriály nové      catalog/series/year
-+ * The first 20 titles of each. When a TMDB key is on the TV (files/tmdb_key.txt, never in the APK) and Cinemeta gives
++ * The first 30 titles of each. When a TMDB key is on the TV (files/tmdb_key.txt, never in the APK) and Cinemeta gives
 + * the title's TMDB id, its Czech title, genres and backdrop come from TMDB; otherwise Cinemeta's own (English) data
 + * and background picture. Shown only when Stremio (com.stremio.one) is installed.
   *
@@ -1806,7 +1806,7 @@ index f90fdbc..ebdf2b6 100644
 +    static final String STREMIO = "com.stremio.one";
      private static final long REFRESH_MS = 6 * 3600_000L, RETRY_MS = 30 * 60_000L;
 -    private static final int MAX_PICKS = 24, MAX_CHECKS = 72;
-+    private static final int PER_CATALOG = 20;
++    private static final int PER_CATALOG = 30;
      static final int SHOWN = 4;
 -    static final String TRENDING = "trending", INDIA = "india";
 +    static final String MOVIES_TOP = "movie_top", MOVIES_NEW = "movie_year", SERIES_TOP = "series_top", SERIES_NEW = "series_year";
@@ -1843,7 +1843,7 @@ index f90fdbc..ebdf2b6 100644
 -        {"paramount", "com.cbs.ott", "Paramount+"},
 -        {"crunchyroll", "com.crunchyroll.crunchyroid", "Crunchyroll"},
 -        {"mubi", "com.mubi", "MUBI"},
-+    private static final int CACHE_VERSION = 8;
++    private static final int CACHE_VERSION = 9;
 +
 +    /** Cinemeta's English genres in Czech, for titles without TMDB data. */
 +    private static final String[][] GENRES = {
@@ -1872,6 +1872,7 @@ index f90fdbc..ebdf2b6 100644
 +        transient File altImage;
 +        transient int tmdb;  // TMDB id from Cinemeta, 0 when missing
 +        transient String year = "";
++        transient String rating = "";   // "★ 7,4 IMDb" (or TMDB when IMDb has none), "" when unknown
 +        transient List<String> genres = new ArrayList<>();
          long at;            // Recently watched: when it was last watched
          String intentUri;   // Recently watched (Watch Next): opens the right title or episode
@@ -1883,7 +1884,7 @@ index f90fdbc..ebdf2b6 100644
  
          String key() { return "pick:" + tab + ":" + kind + ":" + id; }
      }
-@@ -101,11 +106,9 @@ final class Trending {
+@@ -101,11 +107,9 @@ final class Trending {
      private final File dir;
      private final SharedPreferences prefs;
      private final ExecutorService worker = Executors.newSingleThreadExecutor();
@@ -1897,7 +1898,7 @@ index f90fdbc..ebdf2b6 100644
      private final Handler main = new Handler(Looper.getMainLooper());
      private boolean running;
  
-@@ -127,7 +130,7 @@ final class Trending {
+@@ -127,7 +131,7 @@ final class Trending {
          }
      }
  
@@ -1906,7 +1907,7 @@ index f90fdbc..ebdf2b6 100644
      List<Pick> cached(String tab) {
          List<Pick> out = new ArrayList<>();
          for (Pick p : cached()) if (p.tab.equals(tab)) out.add(p);
-@@ -136,7 +139,7 @@ final class Trending {
+@@ -136,7 +140,7 @@ final class Trending {
  
      List<Pick> cached() {
          List<Pick> out = new ArrayList<>();
@@ -1915,7 +1916,7 @@ index f90fdbc..ebdf2b6 100644
          try (InputStream in = new FileInputStream(new File(dir, "picks.json"))) {
              JSONArray a = new JSONArray(new String(readAll(in), StandardCharsets.UTF_8));
              for (int i = 0; i < a.length(); i++) {
-@@ -144,16 +147,17 @@ final class Trending {
+@@ -144,16 +148,17 @@ final class Trending {
                  Pick p = new Pick();
                  p.id = o.getInt("id");
                  p.kind = o.getString("kind");
@@ -1938,7 +1939,7 @@ index f90fdbc..ebdf2b6 100644
              }
          } catch (Exception e) {
              // Nothing saved yet.
-@@ -161,7 +165,7 @@ final class Trending {
+@@ -161,7 +166,7 @@ final class Trending {
          return out;
      }
  
@@ -1947,7 +1948,7 @@ index f90fdbc..ebdf2b6 100644
      static long localHour() {
          long now = System.currentTimeMillis();
          return (now + java.util.TimeZone.getDefault().getOffset(now)) / 3600_000L;
-@@ -179,17 +183,14 @@ final class Trending {
+@@ -179,17 +184,14 @@ final class Trending {
  
      /** Fetches a new list in the background when the saved one is old. Calls back on the main thread. */
      void refreshIfStale(Listener l) {
@@ -1971,7 +1972,7 @@ index f90fdbc..ebdf2b6 100644
          }
          if (now - prefs.getLong("ok_at", 0) < REFRESH_MS || now - prefs.getLong("try_at", 0) < RETRY_MS) return;
          prefs.edit().putLong("try_at", now).apply();
-@@ -213,244 +214,219 @@ final class Trending {
+@@ -213,244 +215,234 @@ final class Trending {
      private void fetch(String key) throws Exception {
          if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("Cannot create " + dir);
          long started = System.currentTimeMillis();
@@ -2160,6 +2161,7 @@ index f90fdbc..ebdf2b6 100644
 +        p.service = "Stremio";
 +        p.description = str(m, "description");
 +        p.year = year(str(m, "year").isEmpty() ? str(m, "releaseInfo") : str(m, "year"));
++        p.rating = rating(str(m, "imdbRating"), "IMDb");
 +        JSONArray g = m.optJSONArray("genres");
 +        if (g != null) for (int i = 0; i < g.length() && p.genres.size() < 2; i++) {
 +            String name = g.optString(i, "");
@@ -2209,6 +2211,8 @@ index f90fdbc..ebdf2b6 100644
 +    private void applyTmdb(Pick p, JSONObject o) {
 +        String title = str(o, p.kind.equals("series") ? "name" : "title");
 +        if (!title.isEmpty()) p.title = title;
++        if (p.rating.isEmpty() && o.optInt("vote_count", 0) >= 50)
++            p.rating = rating(String.valueOf(o.optDouble("vote_average", 0)), "TMDB");
 +        String overview = str(o, "overview");
 +        if (!overview.isEmpty()) p.description = overview;
 +        JSONArray g = o.optJSONArray("genres");
@@ -2280,6 +2284,7 @@ index f90fdbc..ebdf2b6 100644
 +        StringBuilder m = new StringBuilder(p.kind.equals("series") ? "Seriál" : "Film");
 +        for (String g : p.genres) m.append(" · ").append(g);
 +        if (!p.year.isEmpty()) m.append(" · ").append(p.year);
++        if (!p.rating.isEmpty()) m.append(" · ").append(p.rating);
 +        return m.toString();
      }
  
@@ -2288,7 +2293,9 @@ index f90fdbc..ebdf2b6 100644
 -        String kind = o.getString("_kind");
 -        java.util.concurrent.Future<JSONObject> lookup = providerLookups.get(kind + o.getInt("id"));
 -        JSONObject providers;
--        try {
++    /** "★ 7,4 IMDb" from a rating like "7.4"; "" when missing, zero or not a number. */
++    private static String rating(String value, String source) {
+         try {
 -            providers = lookup != null ? lookup.get() : get(key, "/" + kind + "/" + o.getInt("id") + "/watch/providers");
 -        } catch (java.util.concurrent.ExecutionException e) {
 -            throw e.getCause() instanceof Exception ? (Exception) e.getCause() : e;
@@ -2323,26 +2330,33 @@ index f90fdbc..ebdf2b6 100644
 -        if (!posterPath.isEmpty() && !posterPath.equals("null")) {
 -            p.poster = new File(dir, kind + "_" + p.id + "_poster.jpg");
 -            p.posterPath = posterPath;  // the backdrop alone is fine if this fails
--        }
++            double r = Double.parseDouble(value.trim());
++            if (r <= 0 || r > 10) return "";
++            return "\u2605 " + String.format(java.util.Locale.ROOT, "%.1f", r).replace('.', ',') + " " + source;
++        } catch (NumberFormatException | NullPointerException e) {
++            return "";
+         }
 -        return p;
-+    private static String czechGenre(String english) {
-+        for (String[] g : GENRES) if (g[0].equalsIgnoreCase(english)) return g[1];
-+        return english;
      }
  
 -    private static String[] service(String providerName) {
 -        String n = providerName.toLowerCase(Locale.ROOT);
 -        for (String[] s : SERVICES) if (n.contains(s[0])) return s;
 -        return null;
-+    /** The first four-digit year in a string like "2024" or "2019–", or "". */
-+    private static String year(String s) {
-+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(\\d{4})").matcher(s == null ? "" : s);
-+        return m.find() ? m.group(1) : "";
++    private static String czechGenre(String english) {
++        for (String[] g : GENRES) if (g[0].equalsIgnoreCase(english)) return g[1];
++        return english;
      }
  
 -    private static JSONArray tag(JSONArray a, String kind) throws Exception {
 -        for (int i = 0; i < a.length(); i++) a.getJSONObject(i).put("_kind", kind);
 -        return a;
++    /** The first four-digit year in a string like "2024" or "2019–", or "". */
++    private static String year(String s) {
++        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(\\d{4})").matcher(s == null ? "" : s);
++        return m.find() ? m.group(1) : "";
++    }
++
 +    /** A string field, "" when missing or null. */
 +    private static String str(JSONObject o, String k) {
 +        if (o == null || !o.has(k) || o.isNull(k)) return "";
@@ -2397,7 +2411,7 @@ index f90fdbc..ebdf2b6 100644
      }
  
      private void save(List<Pick> picks) throws Exception {
-@@ -458,8 +434,9 @@ final class Trending {
+@@ -458,8 +450,9 @@ final class Trending {
          JSONArray a = new JSONArray();
          Set<String> keep = new HashSet<>();
          for (Pick p : picks) {
@@ -2409,7 +2423,7 @@ index f90fdbc..ebdf2b6 100644
                      .put("poster", p.poster == null ? "" : p.poster.getName()));
              keep.add(p.image.getName());
              if (p.poster != null) keep.add(p.poster.getName());
-@@ -479,25 +456,27 @@ final class Trending {
+@@ -479,25 +472,27 @@ final class Trending {
          }
      }
  
@@ -2447,7 +2461,7 @@ index f90fdbc..ebdf2b6 100644
              try (InputStream in = c.getInputStream()) {
                  return new JSONObject(new String(readAll(in), StandardCharsets.UTF_8));
              }
-@@ -510,15 +489,22 @@ final class Trending {
+@@ -510,15 +505,22 @@ final class Trending {
      }
  
      private static void download(String url, File to) throws IOException {
