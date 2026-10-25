@@ -9,7 +9,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - run: chmod +x gradlew && ./gradlew assembleRelease
+      - run: git apply czech.patch && chmod +x gradlew && ./gradlew assembleRelease
       - uses: actions/upload-artifact@v4
         with:
           name: talkies-apk
