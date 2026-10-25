@@ -2490,7 +2490,7 @@ index d1eca59..0000000
 -    }
 -}
 diff --git a/app/src/main/java/com/techpp/glass/Trending.java b/app/src/main/java/com/techpp/glass/Trending.java
-index f90fdbc..73adc9f 100644
+index f90fdbc..679f04d 100644
 --- a/app/src/main/java/com/techpp/glass/Trending.java
 +++ b/app/src/main/java/com/techpp/glass/Trending.java
 @@ -21,76 +21,104 @@ import java.net.HttpURLConnection;
@@ -2598,7 +2598,7 @@ index f90fdbc..73adc9f 100644
 -        {"paramount", "com.cbs.ott", "Paramount+"},
 -        {"crunchyroll", "com.crunchyroll.crunchyroid", "Crunchyroll"},
 -        {"mubi", "com.mubi", "MUBI"},
-+    private static final int CACHE_VERSION = 15;
++    private static final int CACHE_VERSION = 16;
 +
 +    /** English genre names in Czech: Cinemeta's (titles without TMDB data) and those TMDB leaves untranslated. */
 +    private static final String[][] GENRES = {
@@ -2767,7 +2767,7 @@ index f90fdbc..73adc9f 100644
          }
          if (now - prefs.getLong("ok_at", 0) < REFRESH_MS || now - prefs.getLong("try_at", 0) < RETRY_MS) return;
          prefs.edit().putLong("try_at", now).apply();
-@@ -213,244 +262,583 @@ final class Trending {
+@@ -213,244 +262,604 @@ final class Trending {
      private void fetch(String key) throws Exception {
          if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("Cannot create " + dir);
          long started = System.currentTimeMillis();
@@ -2985,6 +2985,11 @@ index f90fdbc..73adc9f 100644
 -        return net.submit(() -> get(key, path));
 -    }
 +    // ---------------------------------------------------------------- Netflix ids (kids' tabs)
++
++    private static final String RAPID_HOST = "streaming-availability.p.rapidapi.com";
++    /** Free plan: 100 requests a day. */
++    private static final int LOOKUPS_PER_REFRESH = 45, LOOKUPS_PER_DAY = 90, LOOKUPS_AT_ONCE = 2;
++    private static final long NONE_RETRY_MS = 7 * 24 * 3600_000L;
  
 -    /** Starts the "where does it stream?" lookups for the next few titles in a queue, so they're ready when needed. */
 -    private void lookAhead(String key, List<JSONObject> queue, int from, Set<String> exclude) throws Exception {
@@ -2995,12 +3000,6 @@ index f90fdbc..73adc9f 100644
 -            n++;
 -            if (!providerLookups.containsKey(id)) {
 -                providerLookups.put(id, later(key, "/" + o.getString("_kind") + "/" + o.getInt("id") + "/watch/providers"));
--            }
-+    private static final String RAPID_HOST = "streaming-availability.p.rapidapi.com";
-+    /** Free plan: 100 requests a day. */
-+    private static final int LOOKUPS_PER_REFRESH = 45, LOOKUPS_PER_DAY = 90, LOOKUPS_AT_ONCE = 2;
-+    private static final long NONE_RETRY_MS = 7 * 24 * 3600_000L;
-+
 +    /**
 +     * Fills the kids' picks' Netflix ids from files/netflix_ids.json, looking up (within the daily budget) those not
 +     * known yet or not found more than a week ago; then drops the titles known not to be on Netflix CZ and keeps up to
@@ -3013,8 +3012,7 @@ index f90fdbc..73adc9f 100644
 +            cache = new JSONObject(new String(readAll(in), StandardCharsets.UTF_8));
 +        } catch (Exception e) {
 +            // None saved yet.
-         }
--    }
++        }
 +        try {
 +            JSONObject ids = cache.optJSONObject("ids");
 +            if (ids == null) {
@@ -3070,15 +3068,7 @@ index f90fdbc..73adc9f 100644
 +                try (OutputStream out = new FileOutputStream(tmp)) { out.write(cache.toString().getBytes(StandardCharsets.UTF_8)); }
 +                if (!tmp.renameTo(file)) Log.w(TAG, "Cannot save " + file.getName());
 +            }
- 
--    /** Backdrops and posters for the chosen picks, several at a time; a pick whose backdrop fails is dropped. */
--    private List<Pick> downloadImages(List<Pick> picks) throws Exception {
--        List<java.util.concurrent.Future<Boolean>> jobs = new ArrayList<>();
--        for (Pick p : picks) {
--            jobs.add(net.submit(() -> {
--                if (!p.image.isFile()) download(BACKDROPS + p.backdropPath, p.image);
--                if (p.poster != null && !p.poster.isFile()) {
--                    try { download(POSTERS + p.posterPath, p.poster); } catch (IOException e) { p.poster = null; }
++
 +            // Ids onto the picks; titles not on Netflix CZ out.
 +            for (String list : new String[]{KIDS_SERIES, KIDS_MOVIES}) {
 +                List<Pick> picks = byList.get(list);
@@ -3089,6 +3079,45 @@ index f90fdbc..73adc9f 100644
 +                    if (e != null && e.has("id")) p.netflixId = e.optString("id", "");
 +                    else if (e != null && e.has("none")) continue;
 +                    if (kept.size() < PER_CATALOG) kept.add(p);
++                }
++                byList.put(list, kept);
++                Log.i(TAG, list + ": " + kept.size() + " titles on Netflix (or not looked up yet)");
++            }
++        } catch (org.json.JSONException | IOException e) {
++            Log.w(TAG, "Netflix ids: " + e.getMessage());
++            for (String list : new String[]{KIDS_SERIES, KIDS_MOVIES}) {
++                List<Pick> picks = byList.get(list);
++                if (picks != null && picks.size() > PER_CATALOG) byList.put(list, new ArrayList<>(picks.subList(0, PER_CATALOG)));
+             }
+         }
+     }
+ 
+-    /** Backdrops and posters for the chosen picks, several at a time; a pick whose backdrop fails is dropped. */
+-    private List<Pick> downloadImages(List<Pick> picks) throws Exception {
+-        List<java.util.concurrent.Future<Boolean>> jobs = new ArrayList<>();
+-        for (Pick p : picks) {
+-            jobs.add(net.submit(() -> {
+-                if (!p.image.isFile()) download(BACKDROPS + p.backdropPath, p.image);
+-                if (p.poster != null && !p.poster.isFile()) {
+-                    try { download(POSTERS + p.posterPath, p.poster); } catch (IOException e) { p.poster = null; }
++    /**
++     * Kids' series by their age rating (TMDB's content_ratings): the German one when there is one (FSK 0 or 6), else
++     * the US one (TV-Y, TV-Y7, TV-Y7-FV, TV-G); without either, false.
++     */
++    private static boolean kidsSeriesAge(JSONObject details) {
++        // A title can carry several ratings per country (e.g. DE 6 and DE 12); the strictest one counts.
++        JSONObject cr = details.optJSONObject("content_ratings");
++        JSONArray a = cr == null ? null : cr.optJSONArray("results");
++        int de = -1, us = -1;
++        if (a != null) for (int i = 0; i < a.length(); i++) {
++            JSONObject r = a.optJSONObject(i);
++            if (r == null) continue;
++            String country = str(r, "iso_3166_1"), rating = str(r, "rating").trim();
++            if (country.equals("DE")) {
++                try {
++                    de = Math.max(de, Integer.parseInt(rating.replaceAll("[^0-9]", "")));
++                } catch (NumberFormatException e) {
++                    de = Math.max(de, 99);   // unknown German rating: treat as unsuitable
                  }
 -                return true;
 -            }));
@@ -3100,17 +3129,14 @@ index f90fdbc..73adc9f 100644
 -                out.add(picks.get(i));
 -            } catch (java.util.concurrent.ExecutionException e) {
 -                Log.w(TAG, "No backdrop for " + picks.get(i).title + ": " + e.getCause());
-+                byList.put(list, kept);
-+                Log.i(TAG, list + ": " + kept.size() + " titles on Netflix (or not looked up yet)");
-+            }
-+        } catch (org.json.JSONException | IOException e) {
-+            Log.w(TAG, "Netflix ids: " + e.getMessage());
-+            for (String list : new String[]{KIDS_SERIES, KIDS_MOVIES}) {
-+                List<Pick> picks = byList.get(list);
-+                if (picks != null && picks.size() > PER_CATALOG) byList.put(list, new ArrayList<>(picks.subList(0, PER_CATALOG)));
++            } else if (country.equals("US")) {
++                us = Math.max(us, usLevel(rating));
              }
          }
 -        return out;
++        if (de >= 0) return de <= 6;
++        if (us >= 0) return us <= 3;   // TV-Y, TV-Y7, TV-Y7-FV, TV-G
++        return false;
      }
  
 -    /** Films and series alternating, without repeats or titles that have no backdrop. */
@@ -3124,25 +3150,18 @@ index f90fdbc..73adc9f 100644
 -                if (o.optString("backdrop_path", "").isEmpty()) continue;
 -                if (seen.add(o.getString("_kind") + o.getInt("id"))) out.add(o);
 -            }
-+    /**
-+     * Kids' series by their age rating (TMDB's content_ratings): the German one when there is one (FSK 0 or 6), else
-+     * the US one (TV-Y, TV-Y7, TV-Y7-FV, TV-G); without either, false.
-+     */
-+    private static boolean kidsSeriesAge(JSONObject details) {
-+        JSONObject cr = details.optJSONObject("content_ratings");
-+        JSONArray a = cr == null ? null : cr.optJSONArray("results");
-+        String de = "", us = "";
-+        if (a != null) for (int i = 0; i < a.length(); i++) {
-+            JSONObject r = a.optJSONObject(i);
-+            if (r == null) continue;
-+            String country = str(r, "iso_3166_1"), rating = str(r, "rating");
-+            if (country.equals("DE") && de.isEmpty()) de = rating;
-+            if (country.equals("US") && us.isEmpty()) us = rating;
++    /** US TV ratings from mildest (0) to strictest; unknown ones count as strict. */
++    private static int usLevel(String r) {
++        switch (r) {
++            case "TV-Y": return 0;
++            case "TV-Y7": return 1;
++            case "TV-Y7-FV": return 2;
++            case "TV-G": return 3;
++            case "TV-PG": return 4;
++            case "TV-14": return 5;
++            default: return 9;
          }
 -        return out;
-+        if (!de.isEmpty()) return de.equals("0") || de.equals("6");
-+        if (!us.isEmpty()) return us.equals("TV-Y") || us.equals("TV-Y7") || us.equals("TV-Y7-FV") || us.equals("TV-G");
-+        return false;
      }
  
 +    /** "tv:1234" or "movie:5678" (TMDB's kind and id). */
@@ -3201,7 +3220,9 @@ index f90fdbc..73adc9f 100644
 +        } catch (IOException e) {
 +            c.disconnect();
 +            throw e;
-+        }
+         }
+-        Log.i(TAG, tab + ": " + picks.size() + " picks from " + checks + " checks, languages " + langs);
+-        return picks;
 +        // Some replies carry raw control characters, which JSON doesn't allow.
 +        StringBuilder clean = new StringBuilder(body.length());
 +        for (int i = 0; i < body.length(); i++) {
@@ -3254,16 +3275,9 @@ index f90fdbc..73adc9f 100644
 +            if (kids && asian(r)) continue;
 +            int id = r.optInt("id", 0);
 +            if (id > 0 && seen.add(id)) out.add(r);
-         }
--        Log.i(TAG, tab + ": " + picks.size() + " picks from " + checks + " checks, languages " + langs);
--        return picks;
-     }
- 
--    /** The title as a pick if it streams (subscription) in India on an installed app; downloads its backdrop. */
--    private Pick accept(String key, Map<Integer, String[]> services, String tab, JSONObject o) throws Exception {
--        String kind = o.getString("_kind");
--        java.util.concurrent.Future<JSONObject> lookup = providerLookups.get(kind + o.getInt("id"));
--        JSONObject providers;
++        }
++    }
++
 +    /** Kids: an original in Japanese, Korean or Chinese, or a series made in Japan, Korea, China or Taiwan. */
 +    private static boolean asian(JSONObject r) {
 +        String lang = str(r, "original_language");
@@ -3274,8 +3288,13 @@ index f90fdbc..73adc9f 100644
 +            if (cc.equals("JP") || cc.equals("KR") || cc.equals("CN") || cc.equals("TW")) return true;
 +        }
 +        return false;
-+    }
-+
+     }
+ 
+-    /** The title as a pick if it streams (subscription) in India on an installed app; downloads its backdrop. */
+-    private Pick accept(String key, Map<Integer, String[]> services, String tab, JSONObject o) throws Exception {
+-        String kind = o.getString("_kind");
+-        java.util.concurrent.Future<JSONObject> lookup = providerLookups.get(kind + o.getInt("id"));
+-        JSONObject providers;
 +    /** TMDB details path, with the external ids (the IMDb id). */
 +    private static String detailsPath(String kind, int tmdb) {
 +        return kind.equals("series") ? "/tv/" + tmdb + "?language=" + LANG + "&append_to_response=external_ids,content_ratings"
@@ -3299,21 +3318,6 @@ index f90fdbc..73adc9f 100644
 +    private Pick fromTmdb(JSONObject r, String tab, String kind, Future<JSONObject> details) throws InterruptedException {
 +        if (details == null) return null;
 +        JSONObject o;
-+        try {
-+            o = details.get();
-+        } catch (ExecutionException e) {
-+            Log.w(TAG, "No TMDB details for " + r.optInt("id", 0) + ": " + e.getCause());
-+            return null;
-+        }
-+        String imdb = str(o.optJSONObject("external_ids"), "imdb_id");
-+        if (imdb.isEmpty()) imdb = str(o, "imdb_id");
-+        if (!imdb.startsWith("tt")) return null;
-+        if (tab.equals(KIDS_SERIES) && !kidsSeriesAge(o)) return null;
-+        Pick p = new Pick();
-+        p.imdb = imdb;
-+        p.kind = kind.equals("series") ? "series" : "movie";
-+        p.tab = tab;
-+        p.tmdb = r.optInt("id", 0);
          try {
 -            providers = lookup != null ? lookup.get() : get(key, "/" + kind + "/" + o.getInt("id") + "/watch/providers");
 -        } catch (java.util.concurrent.ExecutionException e) {
@@ -3325,44 +3329,20 @@ index f90fdbc..73adc9f 100644
 -        String[] s = null;
 -        for (int i = 0; i < flat.length() && s == null; i++) s = services.get(flat.getJSONObject(i).getInt("provider_id"));
 -        if (s == null) return null;
-+            p.id = Integer.parseInt(imdb.substring(2));
-+        } catch (NumberFormatException e) {
-+            p.id = imdb.hashCode();
++            o = details.get();
++        } catch (ExecutionException e) {
++            Log.w(TAG, "No TMDB details for " + r.optInt("id", 0) + ": " + e.getCause());
++            return null;
 +        }
-+        p.title = str(r, p.kind.equals("series") ? "name" : "title");
-+        boolean netflix = kids(tab);
-+        p.pkg = netflix ? NETFLIX : STREMIO;
-+        p.service = netflix ? "Netflix" : "Stremio";
-+        p.description = str(r, "overview");
-+        applyTmdb(p, o);
-+        if (p.image == null) {
-+            // The details had no backdrop: the list's.
-+            String backdrop = str(r, "backdrop_path");
-+            if (backdrop.isEmpty()) return null;
-+            p.imageUrl = BACKDROPS + backdrop;
-+            p.image = new File(dir, p.kind + "_" + imdb + "_w780.jpg");
-+        }
-+        return p.title.isEmpty() ? null : p;
-+    }
-+
-+    /** One Cinemeta catalog's titles. */
-+    private static JSONArray catalog(String type, String id) throws Exception {
-+        JSONObject o = getUrl(CINEMETA + type + "/" + id + ".json", null);
-+        JSONArray a = o.optJSONArray("metas");
-+        if (a == null) throw new IOException("No metas in " + type + "/" + id);
-+        return a;
-+    }
-+
-+    /** A pick from a Cinemeta title, with its English data and background picture; null without a picture. */
-+    private Pick fromCinemeta(JSONObject m, String tab, String type) {
-+        String imdb = str(m, "id");
++        String imdb = str(o.optJSONObject("external_ids"), "imdb_id");
++        if (imdb.isEmpty()) imdb = str(o, "imdb_id");
 +        if (!imdb.startsWith("tt")) return null;
-+        String background = str(m, "background");
++        if (tab.equals(KIDS_SERIES) && !kidsSeriesAge(o)) return null;
          Pick p = new Pick();
 -        p.id = o.getInt("id");
 -        p.kind = kind;
 +        p.imdb = imdb;
-+        p.kind = type.equals("series") ? "series" : "movie";
++        p.kind = kind.equals("series") ? "series" : "movie";
          p.tab = tab;
 -        p.lang = o.optString("original_language", "");
 -        p.title = o.optString(kind.equals("tv") ? "name" : "title", "");
@@ -3384,6 +3364,45 @@ index f90fdbc..73adc9f 100644
 -        if (!posterPath.isEmpty() && !posterPath.equals("null")) {
 -            p.poster = new File(dir, kind + "_" + p.id + "_poster.jpg");
 -            p.posterPath = posterPath;  // the backdrop alone is fine if this fails
++        p.tmdb = r.optInt("id", 0);
++        try {
++            p.id = Integer.parseInt(imdb.substring(2));
++        } catch (NumberFormatException e) {
++            p.id = imdb.hashCode();
++        }
++        p.title = str(r, p.kind.equals("series") ? "name" : "title");
++        boolean netflix = kids(tab);
++        p.pkg = netflix ? NETFLIX : STREMIO;
++        p.service = netflix ? "Netflix" : "Stremio";
++        p.description = str(r, "overview");
++        applyTmdb(p, o);
++        if (p.image == null) {
++            // The details had no backdrop: the list's.
++            String backdrop = str(r, "backdrop_path");
++            if (backdrop.isEmpty()) return null;
++            p.imageUrl = BACKDROPS + backdrop;
++            p.image = new File(dir, p.kind + "_" + imdb + "_w780.jpg");
+         }
++        return p.title.isEmpty() ? null : p;
++    }
++
++    /** One Cinemeta catalog's titles. */
++    private static JSONArray catalog(String type, String id) throws Exception {
++        JSONObject o = getUrl(CINEMETA + type + "/" + id + ".json", null);
++        JSONArray a = o.optJSONArray("metas");
++        if (a == null) throw new IOException("No metas in " + type + "/" + id);
++        return a;
++    }
++
++    /** A pick from a Cinemeta title, with its English data and background picture; null without a picture. */
++    private Pick fromCinemeta(JSONObject m, String tab, String type) {
++        String imdb = str(m, "id");
++        if (!imdb.startsWith("tt")) return null;
++        String background = str(m, "background");
++        Pick p = new Pick();
++        p.imdb = imdb;
++        p.kind = type.equals("series") ? "series" : "movie";
++        p.tab = tab;
 +        try {
 +            p.id = Integer.parseInt(imdb.substring(2));
 +        } catch (NumberFormatException e) {
@@ -3406,7 +3425,7 @@ index f90fdbc..73adc9f 100644
 +            p.tmdb = tmdb.isEmpty() ? 0 : (int) Double.parseDouble(tmdb);
 +        } catch (NumberFormatException e) {
 +            p.tmdb = 0;
-         }
++        }
 +        if (!background.isEmpty()) {
 +            p.imageUrl = background;
 +            p.image = new File(dir, p.kind + "_" + imdb + "_cm.jpg");
@@ -3458,8 +3477,11 @@ index f90fdbc..73adc9f 100644
 +            p.posterUrl = POSTERS + poster;
 +            p.poster = new File(dir, p.kind + "_" + p.imdb + "_poster.jpg");
 +        }
-+    }
-+
+     }
+ 
+-    private static JSONArray tag(JSONArray a, String kind) throws Exception {
+-        for (int i = 0; i < a.length(); i++) a.getJSONObject(i).put("_kind", kind);
+-        return a;
 +    /** "Film · Akční · Drama · 2024" or "Seriál · Krimi · 2019". */
 +    private static String meta(Pick p) {
 +        StringBuilder m = new StringBuilder(p.kind.equals("series") ? "Seriál" : "Film");
@@ -3467,11 +3489,8 @@ index f90fdbc..73adc9f 100644
 +        if (!p.year.isEmpty()) m.append(" · ").append(p.year);
 +        if (!p.rating.isEmpty()) m.append(" · ").append(p.rating);
 +        return m.toString();
-     }
- 
--    private static JSONArray tag(JSONArray a, String kind) throws Exception {
--        for (int i = 0; i < a.length(); i++) a.getJSONObject(i).put("_kind", kind);
--        return a;
++    }
++
 +    /** "★ 7,4 IMDb" from a rating like "7.4"; "" when missing, zero or not a number. */
 +    private static String rating(String value, String source) {
 +        try {
@@ -3548,7 +3567,7 @@ index f90fdbc..73adc9f 100644
      }
  
      private void save(List<Pick> picks) throws Exception {
-@@ -458,9 +846,10 @@ final class Trending {
+@@ -458,9 +867,10 @@ final class Trending {
          JSONArray a = new JSONArray();
          Set<String> keep = new HashSet<>();
          for (Pick p : picks) {
@@ -3562,7 +3581,7 @@ index f90fdbc..73adc9f 100644
              keep.add(p.image.getName());
              if (p.poster != null) keep.add(p.poster.getName());
          }
-@@ -479,25 +868,27 @@ final class Trending {
+@@ -479,25 +889,27 @@ final class Trending {
          }
      }
  
@@ -3600,7 +3619,7 @@ index f90fdbc..73adc9f 100644
              try (InputStream in = c.getInputStream()) {
                  return new JSONObject(new String(readAll(in), StandardCharsets.UTF_8));
              }
-@@ -510,15 +901,22 @@ final class Trending {
+@@ -510,15 +922,22 @@ final class Trending {
      }
  
      private static void download(String url, File to) throws IOException {
