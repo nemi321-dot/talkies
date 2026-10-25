@@ -1,0 +1,2169 @@
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 62a72d4..e5cba64 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -68,7 +68,7 @@
+             </intent-filter>
+         </activity>
+ 
+-        <!-- Control Center: Turn off now / sleep timer (the "lock" action); typing a match into JioHotstar's search. -->
++        <!-- Control Center: Turn off now / sleep timer (the "lock" action); keeping Talkies on Home; remote keys. -->
+         <service
+             android:name=".SleepService"
+             android:exported="true"
+@@ -93,7 +93,7 @@
+         </receiver>
+ 
+         <!-- Recently watched: holds notification access so Android shares which media sessions play and their
+-             titles (JioHotstar and YouTube only). It reads no notifications. -->
++             titles (video apps). It reads no notifications. -->
+         <service
+             android:name=".WatchService"
+             android:exported="true"
+diff --git a/app/src/main/java/com/techpp/glass/Channels.java b/app/src/main/java/com/techpp/glass/Channels.java
+index fea4999..dcd72ee 100644
+--- a/app/src/main/java/com/techpp/glass/Channels.java
++++ b/app/src/main/java/com/techpp/glass/Channels.java
+@@ -19,8 +19,8 @@ import java.util.Map;
+ import java.util.Set;
+ 
+ /**
+- * App channels, as Projectivy shows them: the rows apps publish to Android TV ("Top Picks For You" from JioHotstar,
+- * "Netflix", "Recommended for you" from YouTube…), plus Watch Next. You choose which show and their order
++ * App channels, as Projectivy shows them: the rows apps publish to Android TV ("Netflix", "Doporučeno" from SmartTube,
++ * "Pokračovat ve sledování" from Stremio…), plus Watch Next. You choose which show and their order
+  * (Control Center → Channels); that is kept in the "channels" preferences. Artwork is cached in files/channels/.
+  * Reading programs and downloading artwork is blocking: call off the main thread.
+  */
+@@ -28,10 +28,9 @@ final class Channels {
+     private static final String TAG = "GlassChannels";
+     static final String WATCH_NEXT = "watchnext";
+     private static final int MAX_ITEMS = 15, ART_W = 440;  // cards are 400 px on screen (424 focused)
+-    /** Shown until you change the selection: the rows you had in Projectivy. */
+-    private static final String[] DEFAULT_SHOWN = {WATCH_NEXT, "in.startv.hotstar|Top Picks For You",
+-            "com.netflix.ninja|Netflix", "com.google.android.youtube.tv|Recommended for you",
+-            "com.amazon.amazonvideo.livingroom|Prime Video"};
++    /** Shown until you change the selection, in this order (keys are "package|channel name" as the app publishes it). */
++    private static final String[] DEFAULT_SHOWN = {WATCH_NEXT, "com.netflix.ninja|Netflix",
++            "org.smarttube.beta|Doporučeno", "com.stremio.one|Pokračovat ve sledování"};
+ 
+     static final class Channel {
+         String key, pkg, name, title;
+@@ -54,7 +53,7 @@ final class Channels {
+             w.key = WATCH_NEXT;
+             w.pkg = null;
+             w.name = "Watch Next";
+-            w.title = "Watch Next";
++            w.title = "Pokračovat";
+             w.count = watchNextCount;
+             found.put(w.key, w);
+         }
+@@ -160,8 +159,8 @@ final class Channels {
+                 p.title = str(cur, 0);
+                 String season = str(cur, 6), episode = str(cur, 7), epTitle = str(cur, 8), desc = str(cur, 1);
+                 StringBuilder m = new StringBuilder();
+-                if (!season.isEmpty()) m.append("Season ").append(season);
+-                if (!episode.isEmpty()) m.append(m.length() > 0 ? " · " : "").append("Episode ").append(episode);
++                if (!season.isEmpty()) m.append("Řada ").append(season);
++                if (!episode.isEmpty()) m.append(m.length() > 0 ? " · " : "").append("Díl ").append(episode);
+                 if (!epTitle.isEmpty() && !epTitle.equals(p.title)) m.append(m.length() > 0 ? " · " : "").append(epTitle);
+                 p.meta = m.length() > 0 ? m.toString() : desc;
+                 p.intentUri = str(cur, 4).isEmpty() ? null : str(cur, 4);
+diff --git a/app/src/main/java/com/techpp/glass/Cricket.java b/app/src/main/java/com/techpp/glass/Cricket.java
+deleted file mode 100644
+index 1733623..0000000
+--- a/app/src/main/java/com/techpp/glass/Cricket.java
++++ /dev/null
+@@ -1,537 +0,0 @@
+-package com.techpp.glass;
+-
+-import android.content.Context;
+-import android.content.SharedPreferences;
+-import android.database.Cursor;
+-import android.media.tv.TvContract;
+-import android.os.Handler;
+-import android.os.Looper;
+-import android.util.Log;
+-
+-import org.json.JSONArray;
+-import org.json.JSONObject;
+-
+-import java.io.ByteArrayOutputStream;
+-import java.io.File;
+-import java.io.FileInputStream;
+-import java.io.FileOutputStream;
+-import java.io.IOException;
+-import java.io.InputStream;
+-import java.io.OutputStream;
+-import java.net.HttpURLConnection;
+-import java.net.URL;
+-import java.nio.charset.StandardCharsets;
+-import java.text.SimpleDateFormat;
+-import java.util.ArrayList;
+-import java.util.Arrays;
+-import java.util.Calendar;
+-import java.util.Date;
+-import java.util.HashSet;
+-import java.util.List;
+-import java.util.Locale;
+-import java.util.Set;
+-import java.util.TimeZone;
+-import java.util.concurrent.ExecutorService;
+-import java.util.concurrent.Executors;
+-
+-/**
+- * Cricket scores from CricketData.org (formerly CricAPI; your own free key in files/cricket_key.txt): international
+- * matches (all teams, men's and women's) and the domestic competitions of the TV's country (Region), live or on
+- * today; the home nation's matches come first.
+- * The free key allows about 100 requests a day, so this asks at most every 15 minutes while a match is live and
+- * every hour otherwise, only while the home screen is showing, and stops for the day near the limit.
+- * Watching: the apps' own TV channels are searched for a card naming both teams (that card's link opens the stream).
+- * Otherwise, in India, the app that holds the rights there opens; elsewhere rights vary too much to guess, so the
+- * card opens nothing and says so.
+- */
+-final class Cricket {
+-    private static final String TAG = "GlassCricket";
+-    private static final long LIVE_MS = 15 * 60_000L, IDLE_MS = 60 * 60_000L, RETRY_MS = 10 * 60_000L;
+-    private static final int DAILY_STOP = 92;
+-
+-    /** Full-member and associate nations: a match between two of these (or their women's sides) is international. */
+-    private static final Set<String> NATIONS = new HashSet<>(Arrays.asList(
+-            "india", "australia", "england", "south africa", "new zealand", "pakistan", "sri lanka", "bangladesh",
+-            "west indies", "afghanistan", "ireland", "zimbabwe", "netherlands", "scotland", "nepal", "oman",
+-            "united arab emirates", "uae", "united states of america", "usa", "namibia", "canada", "hong kong",
+-            "papua new guinea", "kenya", "uganda", "italy", "jersey"));
+-    /** Each cricket country's domestic competitions (matched in the series name), by the TV's country code. */
+-    private static final java.util.Map<String, String[]> DOMESTIC = new java.util.HashMap<>();
+-    /** The TV's country code → its national team's name in the feed. */
+-    private static final java.util.Map<String, String> HOME_TEAM = new java.util.HashMap<>();
+-    static {
+-        DOMESTIC.put("IN", new String[]{"indian premier league", "ipl", "women's premier league", "ranji trophy",
+-                "syed mushtaq ali", "vijay hazare", "duleep trophy", "irani cup", "irani trophy", "deodhar trophy",
+-                "cooch behar", "cos nayudu", "ck nayudu"});
+-        DOMESTIC.put("AU", new String[]{"big bash", "sheffield shield", "marsh cup", "one-day cup"});
+-        DOMESTIC.put("GB", new String[]{"county championship", "the hundred", "vitality blast", "t20 blast", "one-day cup"});
+-        DOMESTIC.put("NZ", new String[]{"super smash", "plunket shield", "ford trophy"});
+-        DOMESTIC.put("ZA", new String[]{"sa20", "csa t20", "4-day series", "one-day cup"});
+-        DOMESTIC.put("PK", new String[]{"pakistan super league", "psl", "quaid-e-azam", "national t20"});
+-        DOMESTIC.put("LK", new String[]{"lanka premier league"});
+-        DOMESTIC.put("BD", new String[]{"bangladesh premier league", "bpl"});
+-        DOMESTIC.put("AE", new String[]{"ilt20", "international league t20"});
+-        DOMESTIC.put("US", new String[]{"major league cricket"});
+-        String[][] home = {{"IN", "india"}, {"AU", "australia"}, {"GB", "england"}, {"NZ", "new zealand"},
+-                {"ZA", "south africa"}, {"PK", "pakistan"}, {"LK", "sri lanka"}, {"BD", "bangladesh"},
+-                {"AF", "afghanistan"}, {"IE", "ireland"}, {"ZW", "zimbabwe"}, {"NL", "netherlands"}, {"NP", "nepal"},
+-                {"OM", "oman"}, {"AE", "united arab emirates"}, {"US", "united states of america"}, {"CA", "canada"},
+-                {"NA", "namibia"}, {"HK", "hong kong"}, {"KE", "kenya"}, {"UG", "uganda"}};
+-        for (String[] h : home) HOME_TEAM.put(h[0], h[1]);
+-        // West Indies plays for the Caribbean.
+-        for (String cc : new String[]{"JM", "TT", "BB", "GY", "AG", "LC", "VC", "GD", "KN", "DM"}) {
+-            HOME_TEAM.put(cc, "west indies");
+-            DOMESTIC.put(cc, new String[]{"caribbean premier league", "cpl", "super50"});
+-        }
+-    }
+-    /** India's cricket streamers: their TV channels may carry a live match card, and one has the rights. */
+-    static final String HOTSTAR = "in.startv.hotstar", FANCODE = "com.fancode.tv", SONYLIV = "com.sonyliv",
+-            PRIME = "com.amazon.amazonvideo.livingroom", XSTREAM = "tv.airtel.xstream.tvapp";
+-    private static final String[] STREAMERS = {HOTSTAR, FANCODE, SONYLIV, PRIME, XSTREAM};
+-
+-    static final class Match {
+-        String id, name, status, type, start;   // start: "HH:mm" local, for upcoming
+-        boolean live, ended, home, domestic, intl, test;
+-        String kind;                              // "Test", "ODI", "T20I"; domestic "First-class", "One-day", "T20"
+-        String t1, t2, s1 = "", s2 = "";         // short names and score text ("245/4 (42.3)")
+-        String full1, full2;                      // full team names ("India", "New Zealand")
+-        String img1, img2;
+-        String watchPkg, watchUri;
+-        String search;                            // no match card found: typed into the app's search ("India vs New Zealand")
+-        int rank;                                 // lower shows first
+-    }
+-
+-    interface Listener { void onMatches(List<Match> matches); }
+-
+-    private final Context ctx;
+-    private final File dir;
+-    private final SharedPreferences prefs;
+-    private final ExecutorService worker = Executors.newSingleThreadExecutor();
+-    private final Handler main = new Handler(Looper.getMainLooper());
+-    private boolean running;
+-
+-    Cricket(Context c) {
+-        ctx = c.getApplicationContext();
+-        dir = new File(c.getExternalFilesDir(null), "cricket");
+-        prefs = c.getSharedPreferences("cricket", Context.MODE_PRIVATE);
+-    }
+-
+-    private String key() {
+-        try (InputStream in = new FileInputStream(new File(dir.getParentFile(), "cricket_key.txt"))) {
+-            String k = new String(readAll(in), StandardCharsets.UTF_8).trim();
+-            return k.isEmpty() ? null : k;
+-        } catch (IOException e) {
+-            return null;
+-        }
+-    }
+-
+-    /** The last matches fetched (empty without a key), with watch links looked up again. Blocking (reads channels). */
+-    List<Match> cached() {
+-        List<Match> out = new ArrayList<>();
+-        if (key() == null) return out;
+-        try (InputStream in = new FileInputStream(new File(dir, "matches.json"))) {
+-            out = parse(new JSONObject(new String(readAll(in), StandardCharsets.UTF_8)), Region.country(ctx));
+-        } catch (Exception e) {
+-            return out;
+-        }
+-        JSONObject innings = readInnings();
+-        for (Match m : out) {
+-            applyInnings(m, innings);
+-            findStream(m);
+-        }
+-        return out;
+-    }
+-
+-    void refreshIfStale(Listener l) {
+-        String key = key();
+-        if (key == null || running) return;
+-        long now = System.currentTimeMillis();
+-        String today = new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new Date());
+-        if (!today.equals(prefs.getString("day", ""))) prefs.edit().putString("day", today).putInt("hits", 0).apply();
+-        if (prefs.getInt("hits", 0) >= DAILY_STOP) return;
+-        long every = prefs.getBoolean("any_live", false) ? LIVE_MS : IDLE_MS;
+-        if (prefs.getInt("key_hash", 0) != key.hashCode()) {
+-            prefs.edit().putInt("key_hash", key.hashCode()).remove("ok_at").remove("try_at").apply();
+-        }
+-        if (now - prefs.getLong("ok_at", 0) < every || now - prefs.getLong("try_at", 0) < RETRY_MS) return;
+-        prefs.edit().putLong("try_at", now).apply();
+-        running = true;
+-        worker.execute(() -> {
+-            try {
+-                JSONObject json = fetch(key);
+-                if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("Cannot create " + dir);
+-                File tmp = new File(dir, "matches.json.tmp");
+-                try (OutputStream out = new FileOutputStream(tmp)) { out.write(json.toString().getBytes(StandardCharsets.UTF_8)); }
+-                if (!tmp.renameTo(new File(dir, "matches.json"))) throw new IOException("Cannot save");
+-                JSONObject info = json.optJSONObject("info");
+-                int hits = info != null ? info.optInt("hitsToday", prefs.getInt("hits", 0) + 1) : prefs.getInt("hits", 0) + 1;
+-                List<Match> list = parse(json, Region.country(ctx));
+-                JSONObject innings = updateInnings(key, list);
+-                for (Match m : list) applyInnings(m, innings);
+-                boolean anyLive = false;
+-                for (Match m : list) anyLive |= m.live;
+-                prefs.edit().putLong("ok_at", System.currentTimeMillis()).putInt("hits", hits).putBoolean("any_live", anyLive).apply();
+-                for (Match m : list) {
+-                    findStream(m);
+-                    Log.i(TAG, m.t1 + " v " + m.t2 + (m.live ? " (live)" : "") + " → " + m.watchPkg + (m.watchUri != null ? " (match link)" : " (app)"));
+-                }
+-                Log.i(TAG, list.size() + " matches (" + (anyLive ? "live" : "none live") + "), " + hits + " requests today");
+-                main.post(() -> l.onMatches(list));
+-            } catch (Exception e) {
+-                Log.w(TAG, "Refresh failed: " + e.getClass().getSimpleName() + " " + e.getMessage());
+-            } finally {
+-                main.post(() -> running = false);
+-            }
+-        });
+-    }
+-
+-    // ---------------------------------------------------------------- Test innings
+-
+-    /**
+-     * The quick score list only has each team's latest innings, so a live Test's full innings come from match_info:
+-     * for at most three live Tests (the ones shown first), each at most every 45 minutes. Kept in innings.json.
+-     */
+-    private JSONObject updateInnings(String key, List<Match> list) {
+-        JSONObject all = readInnings(), keep = new JSONObject();
+-        int asked = 0;
+-        long now = System.currentTimeMillis();
+-        boolean first = true;
+-        for (Match m : list) {
+-            if (!m.test || (!m.live && !m.ended)) continue;
+-            JSONObject rec = all.optJSONObject(m.id);
+-            // The Test shown first follows every refresh (15 min); others every 45 min; all of them 45 once the day's
+-            // requests run low.
+-            long every = m.live && first && prefs.getInt("hits", 0) < 70 ? 14 * 60_000L : 45 * 60_000L;
+-            if (m.live) first = false;
+-            boolean stale = rec == null || (m.live && now - rec.optLong("at") > every);
+-            if (stale && asked < 3 && prefs.getInt("hits", 0) + asked < DAILY_STOP) {
+-                asked++;
+-                try {
+-                    JSONObject d = get("https://api.cricapi.com/v1/match_info?id=" + m.id + "&apikey=" + key).getJSONObject("data");
+-                    rec = new JSONObject().put("at", now).put("score", d.optJSONArray("score") == null ? new JSONArray() : d.getJSONArray("score"));
+-                } catch (Exception e) {
+-                    Log.w(TAG, "Innings for " + m.t1 + " v " + m.t2 + " failed: " + e.getMessage());
+-                }
+-            }
+-            try { if (rec != null) keep.put(m.id, rec); } catch (Exception ignored) { }
+-        }
+-        if (asked > 0) prefs.edit().putInt("hits", prefs.getInt("hits", 0) + asked).apply();
+-        try (OutputStream out = new FileOutputStream(new File(dir, "innings.json"))) {
+-            out.write(keep.toString().getBytes(StandardCharsets.UTF_8));
+-        } catch (IOException ignored) { }
+-        return keep;
+-    }
+-
+-    private JSONObject readInnings() {
+-        try (InputStream in = new FileInputStream(new File(dir, "innings.json"))) {
+-            return new JSONObject(new String(readAll(in), StandardCharsets.UTF_8));
+-        } catch (Exception e) {
+-            return new JSONObject();
+-        }
+-    }
+-
+-    private static final class Inn {
+-        String team;
+-        int r, w;
+-        String o;
+-        boolean done;   // all out, declared, or the other side batted after it
+-    }
+-
+-    /** Rewrites a Test's scores from its innings: "425/9d & 84/1 (25)" and "99". */
+-    private static void applyInnings(Match m, JSONObject all) {
+-        JSONObject rec = all.optJSONObject(m.id);
+-        if (!m.test || rec == null) return;
+-        JSONArray sc = rec.optJSONArray("score");
+-        if (sc == null || sc.length() == 0) return;
+-        List<Inn> inns = new ArrayList<>();
+-        String prev = null;
+-        for (int i = 0; i < sc.length(); i++) {
+-            JSONObject s = sc.optJSONObject(i);
+-            if (s == null) continue;
+-            Inn in = new Inn();
+-            String label = s.optString("inning", "").toLowerCase(Locale.ROOT).replaceAll("\\s+inning.*", "").trim();
+-            // The feed sometimes labels an innings with both teams ("a,b"): it's the side that didn't bat just before.
+-            if (label.contains(",")) {
+-                String[] two = label.split(",");
+-                label = two[0].trim().equals(prev) ? two[1].trim() : two[0].trim();
+-            }
+-            in.team = label;
+-            in.r = s.optInt("r");
+-            in.w = s.optInt("w");
+-            in.o = s.optString("o");
+-            if (in.o.endsWith(".0")) in.o = in.o.substring(0, in.o.length() - 2);
+-            in.done = in.w >= 10;
+-            inns.add(in);
+-            prev = label;
+-        }
+-        fixLastInnings(inns, m);
+-        for (int i = 0; i < inns.size() - 1; i++) inns.get(i).done = true;   // someone batted after it
+-        if (m.ended && !inns.isEmpty()) inns.get(inns.size() - 1).done = true;
+-        m.s1 = teamScore(inns, m.full1.toLowerCase(Locale.ROOT), m.s1, m.live);
+-        m.s2 = teamScore(inns, m.full2.toLowerCase(Locale.ROOT), m.s2, m.live);
+-    }
+-
+-    /**
+-     * The feed sometimes credits the latest innings to the wrong team (a follow-on came through as "South Africa
+-     * Inning 2" when Australia were batting). The status says who leads, trails or needs how many, so check the
+-     * innings against it and swap the latest one to the other team when only that adds up.
+-     */
+-    private static void fixLastInnings(List<Inn> inns, Match m) {
+-        if (inns.isEmpty()) return;
+-        String a = m.full1.toLowerCase(Locale.ROOT), b = m.full2.toLowerCase(Locale.ROOT);
+-        Inn last = inns.get(inns.size() - 1);
+-        if (!last.team.equals(a) && !last.team.equals(b)) return;
+-        String other = last.team.equals(a) ? b : a;
+-        if (consistent(inns, m.status, a, b)) return;
+-        String was = last.team;
+-        last.team = other;
+-        if (consistent(inns, m.status, a, b)) {
+-            Log.i(TAG, "Latest innings of " + m.t1 + " v " + m.t2 + " belongs to " + other + ", not " + was + " (from the status)");
+-        } else {
+-            last.team = was;  // the status doesn't settle it: keep the feed's label
+-        }
+-    }
+-
+-    /** Whether the runs add up with "X trail by N runs", "X lead by N runs" or "X need N runs". Unknown status: yes. */
+-    private static boolean consistent(List<Inn> inns, String status, String a, String b) {
+-        java.util.regex.Matcher mm = java.util.regex.Pattern
+-                .compile("(.+?) (trail|lead|need)s? by (\\d+) run|(.+?) (need) (\\d+) run").matcher(status.toLowerCase(Locale.ROOT));
+-        if (!mm.find()) return true;
+-        String who = (mm.group(1) != null ? mm.group(1) : mm.group(4)).replaceAll(".*[:\\-–] *", "").trim();
+-        String verb = mm.group(2) != null ? mm.group(2) : mm.group(5);
+-        int n = Integer.parseInt(mm.group(3) != null ? mm.group(3) : mm.group(6));
+-        String team = who.equals(a) || a.startsWith(who) ? a : who.equals(b) || b.startsWith(who) ? b : null;
+-        if (team == null) return true;
+-        String opp = team.equals(a) ? b : a;
+-        int mine = 0, theirs = 0;
+-        for (Inn in : inns) {
+-            if (in.team.equals(team)) mine += in.r;
+-            else if (in.team.equals(opp)) theirs += in.r;
+-        }
+-        switch (verb) {
+-            case "trail": return mine + n == theirs;
+-            case "lead": return mine == theirs + n;
+-            default: return mine + n == theirs + 1;   // need N to win
+-        }
+-    }
+-
+-    /**
+-     * One team's innings joined with "&": completed ones as "99" (all out) or "425/9d" (declared), the one in progress
+-     * as "84/1 (25)".
+-     */
+-    private static String teamScore(List<Inn> inns, String team, String latest, boolean live) {
+-        List<Inn> mine = new ArrayList<>();
+-        for (Inn in : inns) if (in.team.equals(team)) mine.add(in);
+-        if (mine.isEmpty()) return latest;
+-        StringBuilder b = new StringBuilder();
+-        for (int i = 0; i < mine.size(); i++) {
+-            Inn in = mine.get(i);
+-            boolean isLast = i == mine.size() - 1;
+-            if (b.length() > 0) b.append(" & ");
+-            if (in.w >= 10) b.append(in.r);
+-            else if (in.done) b.append(in.r).append('/').append(in.w).append('d');
+-            else b.append(in.r).append('/').append(in.w).append(" (").append(in.o).append(')');
+-        }
+-        // The quick list's per-team figures can't be trusted for Tests (it credited a follow-on to the wrong side),
+-        // so a Test's scores come only from its innings list, refreshed above.
+-        return b.toString();
+-    }
+-
+-    private static JSONObject get(String url) throws Exception {
+-        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+-        c.setConnectTimeout(15_000);
+-        c.setReadTimeout(20_000);
+-        try {
+-            if (c.getResponseCode() != 200) throw new IOException("HTTP " + c.getResponseCode());
+-            try (InputStream in = c.getInputStream()) {
+-                JSONObject j = new JSONObject(new String(readAll(in), StandardCharsets.UTF_8));
+-                if (!"success".equalsIgnoreCase(j.optString("status"))) throw new IOException(j.optString("reason", j.optString("status")));
+-                return j;
+-            }
+-        } finally {
+-            c.disconnect();
+-        }
+-    }
+-
+-    private static JSONObject fetch(String key) throws Exception {
+-        // cricScore: every current match (fixtures, live, results) in one request, with scores ready to show.
+-        HttpURLConnection c = (HttpURLConnection) new URL("https://api.cricapi.com/v1/cricScore?apikey=" + key).openConnection();
+-        c.setConnectTimeout(15_000);
+-        c.setReadTimeout(20_000);
+-        try {
+-            if (c.getResponseCode() != 200) throw new IOException("HTTP " + c.getResponseCode());
+-            try (InputStream in = c.getInputStream()) {
+-                JSONObject j = new JSONObject(new String(readAll(in), StandardCharsets.UTF_8));
+-                if (!"success".equalsIgnoreCase(j.optString("status"))) throw new IOException("API says: " + j.optString("reason", j.optString("status")));
+-                return j;
+-            }
+-        } finally {
+-            c.disconnect();
+-        }
+-    }
+-
+-    // ---------------------------------------------------------------- which matches
+-
+-    private static List<Match> parse(JSONObject json, String cc) throws Exception {
+-        String[] domesticNames = DOMESTIC.getOrDefault(cc, new String[0]);
+-        String homeTeam = HOME_TEAM.get(cc);
+-        List<Match> out = new ArrayList<>();
+-        JSONArray data = json.optJSONArray("data");
+-        if (data == null) return out;
+-        String today = new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new Date());
+-        Set<String> seen = new HashSet<>();
+-        for (int i = 0; i < data.length(); i++) {
+-            JSONObject o = data.getJSONObject(i);
+-            if (!seen.add(o.optString("id"))) continue;
+-            // Teams come as "India [IND]".
+-            String[] a = team(o.optString("t1")), b = team(o.optString("t2"));
+-            if (a[0].isEmpty() || b[0].isEmpty()) continue;
+-            String series = o.optString("series", "");
+-            boolean intl = nation(a[0]) && nation(b[0]);
+-            String lower = series.toLowerCase(Locale.ROOT);
+-            boolean domestic = false;
+-            for (String d : domesticNames) if (lower.contains(d)) { domestic = true; break; }
+-            if (!intl && !domestic) continue;
+-            String ms = o.optString("ms", "");
+-            Match m = new Match();
+-            m.id = o.optString("id");
+-            m.full1 = a[0];
+-            m.full2 = b[0];
+-            m.name = a[0] + " vs " + b[0] + ", " + series;
+-            m.status = o.optString("status", "");
+-            m.type = o.optString("matchType", "").toUpperCase(Locale.ROOT);
+-            // The feed sometimes leaves a match "live" that never started ("Match starts at Oct 18…"): it isn't.
+-            m.live = "live".equals(ms) && !m.status.toLowerCase(Locale.ROOT).startsWith("match starts");
+-            m.ended = "result".equals(ms);
+-            m.domestic = domestic;
+-            m.home = homeTeam != null && (a[0].toLowerCase(Locale.ROOT).startsWith(homeTeam)
+-                    || b[0].toLowerCase(Locale.ROOT).startsWith(homeTeam));
+-            String gmt = o.optString("dateTimeGMT", "");
+-            // Live, or starting or finished today (a Test that began days ago is still live).
+-            if (!m.live && !today.equals(localDate(gmt, ""))) continue;
+-            m.start = m.live || m.ended ? null : localTime(gmt);
+-            m.t1 = a[1];
+-            m.t2 = b[1];
+-            m.s1 = o.optString("t1s", "").trim();
+-            m.s2 = o.optString("t2s", "").trim();
+-            m.img1 = o.optString("t1img", null);
+-            m.img2 = o.optString("t2img", null);
+-            m.intl = intl;
+-            // The feed sometimes leaves the type blank; a status like "Day 4: …" means a multi-day match.
+-            m.test = m.type.equals("TEST") || (m.type.isEmpty() && m.status.toLowerCase(Locale.ROOT).startsWith("day "));
+-            m.kind = m.test ? (intl ? "Test" : "First-class") : m.type.equals("ODI") ? (intl ? "ODI" : "One-day")
+-                    : m.type.equals("T20") ? (intl ? "T20I" : "T20") : "";
+-            m.rank = (m.live ? 0 : m.ended ? 20 : 10) + (m.home ? 0 : 4) + (intl ? 0 : 2);
+-            out.add(m);
+-        }
+-        out.sort((x, y) -> Integer.compare(x.rank, y.rank));
+-        return out;
+-    }
+-
+-    /** "India Women [INDW]" → {"India Women", "IND-W"}. */
+-    private static String[] team(String s) {
+-        String name = s, code = "";
+-        int k = s.lastIndexOf(" [");
+-        if (k > 0 && s.endsWith("]")) {
+-            name = s.substring(0, k).trim();
+-            code = s.substring(k + 2, s.length() - 1).trim().toUpperCase(Locale.ROOT);
+-        }
+-        if (code.isEmpty()) code = name.length() <= 4 ? name.toUpperCase(Locale.ROOT) : name.substring(0, 3).toUpperCase(Locale.ROOT);
+-        if (name.toLowerCase(Locale.ROOT).endsWith(" women") && code.endsWith("W") && !code.endsWith("-W")) {
+-            code = code.substring(0, code.length() - 1) + "-W";
+-        }
+-        return new String[]{name, code};
+-    }
+-
+-    private static boolean nation(String team) {
+-        String t = team.toLowerCase(Locale.ROOT).trim();
+-        if (t.endsWith(" women")) t = t.substring(0, t.length() - 6).trim();
+-        return NATIONS.contains(t);
+-    }
+-
+-
+-
+-
+-    private static Date parseGmt(String gmt) {
+-        try {
+-            SimpleDateFormat f = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US);
+-            f.setTimeZone(TimeZone.getTimeZone("GMT"));
+-            return f.parse(gmt);
+-        } catch (Exception e) {
+-            return null;
+-        }
+-    }
+-
+-    private static String localDate(String gmt, String fallback) {
+-        Date d = parseGmt(gmt);
+-        return d == null ? fallback : new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(d);
+-    }
+-
+-    private static String localTime(String gmt) {
+-        Date d = parseGmt(gmt);
+-        return d == null ? null : new SimpleDateFormat("h:mm a", Locale.US).format(d).toLowerCase(Locale.ROOT);
+-    }
+-
+-    // ---------------------------------------------------------------- where to watch
+-
+-    /**
+-     * Looks through the streaming apps' TV channels for a card that names both teams (e.g. JioHotstar's
+-     * "IND vs AUS, 2nd ODI – LIVE"): its link opens the stream itself. Otherwise picks the app with the rights in India,
+-     * and for JioHotstar its search, with both teams typed in (see SleepService.searchHotstar).
+-     */
+-    private void findStream(Match m) {
+-        boolean india = "IN".equals(Region.country(ctx));
+-        String[] names1 = {m.t1.toLowerCase(Locale.ROOT).replace("-w", ""), m.full1.toLowerCase(Locale.ROOT)},
+-                names2 = {m.t2.toLowerCase(Locale.ROOT).replace("-w", ""), m.full2.toLowerCase(Locale.ROOT)};
+-        try (Cursor ch = ctx.getContentResolver().query(TvContract.Channels.CONTENT_URI,
+-                new String[]{TvContract.Channels._ID, TvContract.Channels.COLUMN_PACKAGE_NAME, TvContract.Channels.COLUMN_TYPE},
+-                null, null, null)) {
+-            while (ch != null && ch.moveToNext()) {
+-                String pkg = ch.getString(1);
+-                // In India, only the cricket streamers' rows (news apps name teams too); elsewhere any app's.
+-                if (india && !Arrays.asList(STREAMERS).contains(pkg)) continue;
+-                if (!TvContract.Channels.TYPE_PREVIEW.equals(ch.getString(2))) continue;
+-                try (Cursor p = ctx.getContentResolver().query(TvContract.buildPreviewProgramsUriForChannel(ch.getLong(0)),
+-                        new String[]{TvContract.PreviewPrograms.COLUMN_TITLE, TvContract.PreviewPrograms.COLUMN_SHORT_DESCRIPTION,
+-                                TvContract.PreviewPrograms.COLUMN_INTENT_URI}, null, null, null)) {
+-                    while (p != null && p.moveToNext()) {
+-                        String text = (p.getString(0) + " " + p.getString(1)).toLowerCase(Locale.ROOT);
+-                        if (mentions(text, names1) && mentions(text, names2) && p.getString(2) != null) {
+-                            m.watchPkg = pkg;
+-                            m.watchUri = p.getString(2);
+-                            return;
+-                        }
+-                    }
+-                }
+-            }
+-        } catch (Exception e) {
+-            Log.w(TAG, "Couldn't search channels: " + e);
+-        }
+-        // No card found: in India the rights holder opens (JioHotstar with its search typed in); elsewhere nothing.
+-        m.watchPkg = india ? rightsHolder(m) : null;
+-        m.search = india ? m.full1 + " vs " + m.full2 : null;
+-    }
+-
+-    private static boolean mentions(String text, String[] names) {
+-        for (String n : names) {
+-            if (n.isEmpty()) continue;
+-            if (n.length() <= 4 ? text.matches("(?s).*\\b" + java.util.regex.Pattern.quote(n) + "\\b.*") : text.contains(n)) return true;
+-        }
+-        return false;
+-    }
+-
+-    /** Who streams it in India (2026): JioHotstar has BCCI (home internationals, domestic, IPL) and ICC events. */
+-    private static String rightsHolder(Match m) {
+-        String n = m.name.toLowerCase(Locale.ROOT);
+-        if (n.contains("lanka premier league")) return FANCODE;
+-        if (n.contains("asia cup")) return SONYLIV;
+-        return HOTSTAR;
+-    }
+-
+-    private static byte[] readAll(InputStream in) throws IOException {
+-        ByteArrayOutputStream out = new ByteArrayOutputStream();
+-        byte[] b = new byte[8192];
+-        for (int n; (n = in.read(b)) > 0; ) out.write(b, 0, n);
+-        return out.toByteArray();
+-    }
+-}
+diff --git a/app/src/main/java/com/techpp/glass/HomeActivity.java b/app/src/main/java/com/techpp/glass/HomeActivity.java
+index a7425a2..076465c 100644
+--- a/app/src/main/java/com/techpp/glass/HomeActivity.java
++++ b/app/src/main/java/com/techpp/glass/HomeActivity.java
+@@ -60,7 +60,6 @@ import java.util.Calendar;
+ import java.util.Collections;
+ import java.util.HashSet;
+ import java.util.List;
+-import java.util.Locale;
+ import java.util.Map;
+ import java.util.Set;
+ import java.util.WeakHashMap;
+@@ -68,7 +67,7 @@ import java.util.concurrent.ExecutorService;
+ import java.util.concurrent.Executors;
+ 
+ /**
+- * Talkies. One screen: "For You" with tabs (Continue, Trending, New in India) and a row of picks, round icon
++ * Talkies. One screen: "For You" with tabs (Continue, Trending, New in <country>) and a row of picks, round icon
+  * buttons and a small time · date · weather line at the top right, a dock of seven apps in one band, and every other
+  * app below the fold. Light by day, dark at night. The remote is handled entirely here, so navigation is exact.
+  */
+@@ -78,14 +77,14 @@ public class HomeActivity extends Activity {
+     // Where focus is.
+     private static final int Z_TOP = 0, Z_TABS = 1, Z_PICKS = 2, Z_DOCK = 3, Z_GRID = 4, Z_MENU = 5, Z_CHAN = 6;
+     private static final int P_CONTROL = 0, P_INPUTS = 1, P_WIFI = 2, P_SETTINGS = 3, P_BELL = 4;
+-    private static final String[] TAB_IDS = {RecentStore.TAB, Trending.TRENDING, Trending.INDIA};
++    private static final String[] TAB_IDS = {RecentStore.TAB, Trending.TRENDING, Trending.LOCAL};
+     private static final int TAB_TRENDING = 1, MIN_CONTINUE = 10, MAX_CONTINUE = 16, MAX_YOUTUBE = 2;
+     private static final int DOCK_SIZE = 7, GRID_COLS = 6;
+     // Geometry (dp, on a 960 × 540 dp screen).
+     private static final int DOCK_TILE_W = 112, DOCK_TILE_H = 63, GRID_TILE_W = 133, GRID_TILE_H = 75, GRID_GAP_X = 16,
+             GRID_GAP_Y = 18;
+     // Channel rows, below the dock: header, a row of cards, the focused card's title and description.
+-    private static final int CHAN_TOP = 548, CHAN_ROW_H = 212, CH_W = 200, CH_H = 112, CH_GAP = 18, CRICKET_W = 280;
++    private static final int CHAN_TOP = 548, CHAN_ROW_H = 212, CH_W = 200, CH_H = 112, CH_GAP = 18;
+     private static final int MENU_PLAIN = 0, MENU_CHANNELS = 1;
+ 
+     private float dp;
+@@ -125,13 +124,10 @@ public class HomeActivity extends Activity {
+     // Picks for the three tabs, and what the row shows now.
+     private Trending trending;
+     private Weather weather;
+-    private Cricket cricket;
+-    private List<Cricket.Match> matches = new ArrayList<>();
+-    private List<Channels.Channel> appChannels = new ArrayList<>();  // the shown app channels, without Cricket
+-    private TextView score;
++    private List<Channels.Channel> appChannels = new ArrayList<>();  // the shown app channels
+     private String weatherLine;
+     private List<Trending.Pick> watchNextPicks = new ArrayList<>(), recentPicks = new ArrayList<>(),
+-            trendPicks = new ArrayList<>(), indiaPicks = new ArrayList<>(), rowPicks = new ArrayList<>();
++            trendPicks = new ArrayList<>(), localPicks = new ArrayList<>(), rowPicks = new ArrayList<>();
+     private int tabIdx = TAB_TRENDING;
+     private long pickHour = -1;
+     private final ExecutorService background = Executors.newSingleThreadExecutor();
+@@ -239,7 +235,7 @@ public class HomeActivity extends Activity {
+         moveHint = findViewById(R.id.move_hint);
+         picksRow = findViewById(R.id.picks);
+         ring = findViewById(R.id.ring);
+-        tabs = new TextView[]{findViewById(R.id.tab_recent), findViewById(R.id.tab_trending), findViewById(R.id.tab_india)};
++        tabs = new TextView[]{findViewById(R.id.tab_recent), findViewById(R.id.tab_trending), findViewById(R.id.tab_local)};
+         icons = new ImageView[]{findViewById(R.id.icon_cc), findViewById(R.id.icon_inputs), findViewById(R.id.icon_wifi),
+                 findViewById(R.id.icon_settings), findViewById(R.id.icon_bell)};
+         Updates.setListener(this::onUpdates);
+@@ -250,8 +246,6 @@ public class HomeActivity extends Activity {
+         AppEntry.setBannerSize(px(GRID_TILE_W * 1.10f), px(GRID_TILE_H * 1.10f));
+         trending = new Trending(this);
+         weather = new Weather(this);
+-        cricket = new Cricket(this);
+-        score = findViewById(R.id.score);
+         weatherLine = weather.cached();
+         day = isDayNow();
+         theme = Theme.of(day);
+@@ -321,8 +315,8 @@ public class HomeActivity extends Activity {
+         ring.setDay(day);
+         for (int i = 0; i < picksRow.getChildCount(); i++) stylePickText(picksRow.getChildAt(i));
+         styleChannels();
+-        // Card backgrounds and match cards are drawn in the theme's colours: redraw the rows.
+-        if (cricket != null && zone != Z_CHAN && !chanRows.isEmpty()) {
++        // Card backgrounds are drawn in the theme's colours: redraw the rows.
++        if (zone != Z_CHAN && !chanRows.isEmpty()) {
+             chanSignature = "";
+             showChannels(appChannels);
+         }
+@@ -392,7 +386,7 @@ public class HomeActivity extends Activity {
+         SpannableStringBuilder b = new SpannableStringBuilder(time);
+         b.setSpan(new ForegroundColorSpan(theme.text), 0, time.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+         b.setSpan(new StyleSpan(Typeface.BOLD), 0, time.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+-        b.append("  ·  ").append(DateFormat.format("EEE d MMM", now));
++        b.append("  ·  ").append(DateFormat.format("EEE d. MMM", now));
+         if (weatherLine != null) b.append("  ·  ").append(weatherLine);
+         info.setTextColor(theme.text2);
+         info.setText(b);
+@@ -400,41 +394,9 @@ public class HomeActivity extends Activity {
+         bigTime.setText(DateFormat.format(h24 ? "HH:mm" : "h:mm", now));
+         bigAmPm.setText(h24 ? "" : DateFormat.format("a", now));
+         bigAmPm.setVisibility(h24 ? View.GONE : View.VISIBLE);
+-        bigDate.setText(DateFormat.format("EEEE  d MMMM", now));
++        bigDate.setText(DateFormat.format("EEEE  d. MMMM", now));
+         bigWeather.setText(weatherLine == null ? "" : weatherLine);
+         bigWeather.setVisibility(weatherLine == null ? View.GONE : View.VISIBLE);
+-        updateScore();
+-    }
+-
+-    /** "● LIVE  IND 245/4 (42.3) v AUS", or today's next match, or today's result; hidden when there's none. */
+-    private void updateScore() {
+-        Cricket.Match m = matches.isEmpty() ? null : matches.get(0);
+-        if (m == null) {
+-            score.setVisibility(View.GONE);
+-            credit.setAlpha(1f);
+-            return;
+-        }
+-        SpannableStringBuilder b = new SpannableStringBuilder();
+-        if (m.live) {
+-            b.append("● LIVE  ");
+-            b.setSpan(new ForegroundColorSpan(0xFFFF453A), 0, 6, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+-            if (!m.kind.isEmpty()) b.append(m.kind).append("  ·  ");
+-            b.append(m.t1).append(m.s1.isEmpty() ? "" : " " + m.s1).append("  v  ").append(m.t2).append(m.s2.isEmpty() ? "" : " " + m.s2);
+-        } else if (!m.ended) {
+-            b.append(m.t1).append(" v ").append(m.t2).append(m.start == null ? "" : "  ·  " + m.start).append(m.kind.isEmpty() ? "" : "  ·  " + m.kind);
+-        } else {
+-            b.append(m.t1).append(" v ").append(m.t2).append("  ·  ").append(m.status);
+-        }
+-        score.setText(b);
+-        score.setTextColor(theme.text);
+-        score.setVisibility(View.VISIBLE);
+-        credit.setAlpha(0f);  // the score sits where the TMDB credit goes; TMDB is credited in the README too
+-    }
+-
+-    private void onMatches(List<Cricket.Match> list) {
+-        matches = list;
+-        updateScore();
+-        if (zone != Z_CHAN) showChannels(appChannels);
+     }
+ 
+     private void onMinute() {
+@@ -447,7 +409,7 @@ public class HomeActivity extends Activity {
+     }
+ 
+     /** Appearance from Control Center: Auto (by sunrise and sunset), Light or Dark. */
+-    private static final String[] APPEARANCE = {"Auto", "Light", "Dark"};
++    private static final String[] APPEARANCE = {"Automaticky", "Světlý", "Tmavý"};
+ 
+     private boolean isDayNow() {
+         int mode = prefs.getInt("appearance", 0);
+@@ -607,28 +569,9 @@ public class HomeActivity extends Activity {
+         });
+     }
+ 
+-    /** The channel rows: Cricket first while there are matches, then your app channels. */
++    /** The channel rows: your app channels. */
+     private void showChannels(List<Channels.Channel> apps) {
+-        List<Channels.Channel> list = new ArrayList<>();
+-        if (!matches.isEmpty()) {
+-            Channels.Channel c = new Channels.Channel();
+-            c.key = "cricket";
+-            c.name = "Cricket";
+-            c.title = "Cricket";
+-            for (Cricket.Match m : matches) {
+-                Trending.Pick p = new Trending.Pick();
+-                p.kind = "cricket";
+-                p.extra = m;
+-                p.id = (m.id + m.s1 + m.s2 + m.status).hashCode();
+-                p.title = m.name;
+-                p.meta = (m.kind.isEmpty() ? "" : m.kind + " · ") + m.status;
+-                p.pkg = m.watchPkg;
+-                p.intentUri = m.watchUri;
+-                c.items.add(p);
+-            }
+-            list.add(c);
+-        }
+-        list.addAll(apps);
++        List<Channels.Channel> list = new ArrayList<>(apps);
+         {
+             {
+                 StringBuilder sig = new StringBuilder();
+@@ -670,15 +613,7 @@ public class HomeActivity extends Activity {
+             header.setOrientation(LinearLayout.HORIZONTAL);
+             header.setGravity(android.view.Gravity.CENTER_VERTICAL);
+             header.setPadding(px(40), 0, px(40), 0);
+-            if ("cricket".equals(ch.key)) {
+-                TextView dot = new TextView(this);
+-                dot.setText("●");
+-                dot.setTextColor(0xFFFF453A);
+-                dot.setTextSize(12);
+-                LinearLayout.LayoutParams dl = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+-                dl.rightMargin = px(8);
+-                if (!matches.isEmpty() && matches.get(0).live) header.addView(dot, dl);
+-            } else if (ch.pkg != null) {
++            if (ch.pkg != null) {
+                 ImageView icon = new ImageView(this);
+                 try {
+                     // App icons can be 512 px; keep a 20 dp copy.
+@@ -759,12 +694,11 @@ public class HomeActivity extends Activity {
+         layoutPage();
+     }
+ 
+-    /** Cricket cards are wider: a Test's scores ("425/9d & 84/1 (25)") need the room. */
+-    private static int cardW(Channels.Channel ch) { return "cricket".equals(ch.key) ? CRICKET_W : CH_W; }
++    /** Every channel card has the same width. */
++    private static int cardW(Channels.Channel ch) { return CH_W; }
+ 
+     /** A card in a channel row: its artwork (loaded in the background), or the app's banner and the title. */
+     private View channelCard(Trending.Pick p) {
+-        if (p.extra instanceof Cricket.Match) return cricketCard((Cricket.Match) p.extra);
+         FrameLayout card = new FrameLayout(this);
+         card.setBackground(rounded(theme.tileBg, 0, 10));
+         final float r = px(10);
+@@ -801,73 +735,6 @@ public class HomeActivity extends Activity {
+         return card;
+     }
+ 
+-    /** A match card: each team's flag, short name and score, then the status ("India need 38 off 24"). */
+-    private View cricketCard(Cricket.Match m) {
+-        FrameLayout card = new FrameLayout(this);
+-        card.setBackground(rounded(theme.tileBg, 0, 10));
+-        LinearLayout col = new LinearLayout(this);
+-        col.setOrientation(LinearLayout.VERTICAL);
+-        col.setPadding(px(14), px(12), px(14), px(10));
+-        col.addView(teamLine(m.t1, m.s1, m.img1));
+-        col.addView(teamLine(m.t2, m.s2, m.img2));
+-        TextView st = new TextView(this);
+-        st.setTag("cricketText");
+-        String kind = m.kind.isEmpty() ? "" : m.kind + "  ·  ";
+-        String status = m.live ? "LIVE  ·  " + kind + m.status : !m.ended && m.start != null ? kind + "starts " + m.start : kind + m.status;
+-        SpannableStringBuilder sb = new SpannableStringBuilder(status);
+-        if (m.live) sb.setSpan(new ForegroundColorSpan(0xFFFF453A), 0, 4, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+-        st.setText(sb);
+-        st.setSingleLine(true);
+-        st.setEllipsize(android.text.TextUtils.TruncateAt.END);
+-        st.setTextSize(12);
+-        st.setTypeface(getResources().getFont(R.font.outfit));
+-        st.setTextColor(theme.text2);
+-        LinearLayout.LayoutParams sl = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1);
+-        st.setGravity(android.view.Gravity.BOTTOM);
+-        col.addView(st, sl);
+-        card.addView(col, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+-        card.setContentDescription(m.name + ". " + m.status);
+-        return card;
+-    }
+-
+-    private View teamLine(String team, String runs, String flagUrl) {
+-        LinearLayout line = new LinearLayout(this);
+-        line.setOrientation(LinearLayout.HORIZONTAL);
+-        line.setGravity(android.view.Gravity.CENTER_VERTICAL);
+-        ImageView flag = new ImageView(this);
+-        flag.setScaleType(ImageView.ScaleType.CENTER_CROP);
+-        if (flagUrl != null && !flagUrl.isEmpty()) {
+-            background.execute(() -> {
+-                File f = WatchNext.cached(this, new File(getExternalFilesDir(null), "cricket/flags"), flagUrl, 64);
+-                Bitmap b = f == null ? null : BitmapFactory.decodeFile(f.getPath());
+-                if (b != null) runOnUiThread(() -> flag.setImageBitmap(b));
+-            });
+-        }
+-        LinearLayout.LayoutParams fl = new LinearLayout.LayoutParams(px(20), px(20));
+-        fl.rightMargin = px(8);
+-        line.addView(flag, fl);
+-        TextView name = new TextView(this);
+-        name.setTag("cricketText");
+-        name.setText(team);
+-        name.setTextSize(15);
+-        name.setTypeface(getResources().getFont(R.font.outfit));
+-        name.setFontVariationSettings("'wght' 600");
+-        name.setTextColor(theme.text);
+-        line.addView(name, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+-        TextView sc = new TextView(this);
+-        sc.setTag("cricketText");
+-        sc.setText(runs);
+-        sc.setSingleLine(true);
+-        sc.setTextSize(14);
+-        sc.setTypeface(getResources().getFont(R.font.outfit));
+-        sc.setFontVariationSettings("'wght' 500");
+-        sc.setTextColor(theme.text);
+-        line.addView(sc);
+-        LinearLayout.LayoutParams ll = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, px(26));
+-        line.setLayoutParams(ll);
+-        return line;
+-    }
+-
+     private void styleChannels() {
+         for (int i = 0; i < channelsBox.getChildCount(); i++) {
+             View row = channelsBox.getChildAt(i);
+@@ -883,10 +750,10 @@ public class HomeActivity extends Activity {
+     private void loadPicks() {
+         recentPicks = continuePicks(RecentStore.load(this), watchNextPicks);
+         trendPicks = trending.cached(Trending.TRENDING);
+-        indiaPicks = trending.cached(Trending.INDIA);
++        localPicks = trending.cached(Trending.LOCAL);
+     }
+ 
+-    private List<Trending.Pick> picksFor(int t) { return t == 0 ? recentPicks : t == 1 ? trendPicks : indiaPicks; }
++    private List<Trending.Pick> picksFor(int t) { return t == 0 ? recentPicks : t == 1 ? trendPicks : localPicks; }
+ 
+     /**
+      * Continue: what apps put on Android's Watch Next list (Netflix, Prime Video…, opening the right episode) plus what
+@@ -900,7 +767,7 @@ public class HomeActivity extends Activity {
+         for (Trending.Pick p : watchNext) if (!hidden.contains(continueKey(p))) wnShown.add(p);
+         watchNext = wnShown;
+         // An app's Watch Next entries (they open the right episode) win over what we saw it play, unless it played
+-        // something more recently than its newest entry: JioHotstar, for one, doesn't always update Watch Next.
++        // something more recently than its newest entry: some apps don't always update Watch Next.
+         Map<String, Long> newest = new java.util.HashMap<>();
+         for (Trending.Pick p : watchNext) newest.merge(p.pkg, p.at, Math::max);
+         List<Trending.Pick> all = new ArrayList<>(watchNext);
+@@ -1065,7 +932,7 @@ public class HomeActivity extends Activity {
+     }
+ 
+     /**
+-     * A card with no picture (JioHotstar shares none while playing): the app's colour, with its logo at its own sharp
++     * A card with no picture (some apps share none while playing): the app's colour, with its logo at its own sharp
+      * size in the middle, instead of the small banner stretched across the card.
+      */
+     private void showAppLogo(View card, ImageView v, String pkg) {
+@@ -1167,7 +1034,7 @@ public class HomeActivity extends Activity {
+ 
+     private void onPicks(List<Trending.Pick> all) {
+         trendPicks = trending.cached(Trending.TRENDING);
+-        indiaPicks = trending.cached(Trending.INDIA);
++        localPicks = trending.cached(Trending.LOCAL);
+         if (zone != Z_PICKS && zone != Z_TABS) { tabIdx = TAB_TRENDING; buildPicksRow(0); } else styleTop();
+     }
+ 
+@@ -1498,17 +1365,8 @@ public class HomeActivity extends Activity {
+                 Log.w(TAG, "Link failed, opening the app: " + ex.getClass().getSimpleName());
+             }
+         }
+-        // A match JioHotstar has no card for: open its search page and have SleepService type both teams in
+-        // (its search links ignore the text). With the service off, the empty search page still opens.
+-        if (p.extra instanceof Cricket.Match && Cricket.HOTSTAR.equals(p.pkg) && ((Cricket.Match) p.extra).search != null) {
+-            String text = ((Cricket.Match) p.extra).search;
+-            if (!SleepService.searchHotstar(text)) Log.i(TAG, "Accessibility off: opening JioHotstar search without " + text);
+-            start(new Intent(Intent.ACTION_VIEW, Uri.parse("https://www.hotstar.com/in/explore")).setPackage(Cricket.HOTSTAR));
+-            return;
+-        }
+         Intent i = p.pkg == null ? null : pm.getLeanbackLaunchIntentForPackage(p.pkg);
+         if (i != null) start(i);
+-        else if (p.extra instanceof Cricket.Match) Toast.makeText(this, "None of your apps has a card for this match", Toast.LENGTH_SHORT).show();
+     }
+ 
+     private void back() {
+@@ -1542,7 +1400,7 @@ public class HomeActivity extends Activity {
+         beforeMove = new ArrayList<>(apps);
+         ring.setMoving(true);
+         refocusMoving();
+-        moveHint.setText("Moving " + apps.get(ai).label + "  ·  OK to place  ·  Back to cancel");
++        moveHint.setText("Přesouvání: " + apps.get(ai).label + "  ·  OK umístit  ·  Zpět zrušit");
+         moveHint.setAlpha(0f);
+         moveHint.setVisibility(View.VISIBLE);
+         moveHint.animate().alpha(1f).setDuration(150).start();
+@@ -1752,7 +1610,7 @@ public class HomeActivity extends Activity {
+         n = 1;
+         for (TvInputInfo i : av) addInput(av.size() == 1 ? "AV" : fixLabel(label(i), "AV " + n++), tim, i, passthrough(i));
+         final TvInputInfo tunerInfo = tuner;
+-        addRow("Live TV", null, () -> {
++        addRow("Živé vysílání", null, () -> {
+             if (tunerInfo != null) {
+                 Intent v = new Intent(Intent.ACTION_VIEW);
+                 v.setDataAndType(TvContract.buildChannelsUriForInput(tunerInfo.getId()), "vnd.android.cursor.dir/channel");
+@@ -1801,29 +1659,29 @@ public class HomeActivity extends Activity {
+         if (name.isEmpty() || name.contains("HW") || name.contains("/")) return null;
+         int state;
+         try { state = tim.getInputState(device.getId()); } catch (Exception e) { return name; }
+-        if (state == TvInputManager.INPUT_STATE_CONNECTED) return name + "  ·  On";
+-        if (state == TvInputManager.INPUT_STATE_CONNECTED_STANDBY) return name + "  ·  Standby";
++        if (state == TvInputManager.INPUT_STATE_CONNECTED) return name + "  ·  Zapnuto";
++        if (state == TvInputManager.INPUT_STATE_CONNECTED_STANDBY) return name + "  ·  Pohotovost";
+         return name;
+     }
+ 
+     // ---------------------------------------------------------------- remote keys
+ 
+-    /** One row per button with a job ("Prog Red → Open JioHotstar"), then Add a key. */
++    /** One row per button with a job ("Prog Red → Otevřít Netflix"), then Add a key. */
+     private void openRemoteKeys() {
+-        beginMenu(P_CONTROL, "Remote keys");
++        beginMenu(P_CONTROL, "Tlačítka ovladače");
+         for (Map.Entry<Integer, String> e : RemoteKeys.all(this).entrySet()) {
+             int code = e.getKey();
+             addRow(RemoteKeys.keyName(code), RemoteKeys.describe(this, e.getValue()), () -> openKeyActions(code), false);
+         }
+-        addRow("Add a key", null, this::learnKey, false);
++        addRow("Přidat tlačítko", null, this::learnKey, false);
+         showMenu(360);
+     }
+ 
+     /** Waits for the next remote button (through the accessibility service, so the TV doesn't act on it). */
+     private void learnKey() {
+         if (!SleepService.isRunning()) { needsTurnOffSetup(); return; }
+-        beginMenu(P_CONTROL, "Press the button on your remote");
+-        addRow("Waiting for a button…", "Back cancels", () -> { }, true);
++        beginMenu(P_CONTROL, "Stiskněte tlačítko na ovladači");
++        addRow("Čekám na tlačítko…", "Zpět zruší", () -> { }, true);
+         menuClosed = () -> { SleepService.learn(null); focusTop(P_CONTROL); };
+         showMenu(360);
+         SleepService.learn(code -> {
+@@ -1834,17 +1692,17 @@ public class HomeActivity extends Activity {
+     /** What the button does: an app, Inputs, Talkies, nothing, or its normal job. */
+     private void openKeyActions(int code) {
+         menuClosed = null;
+-        beginMenu(P_CONTROL, RemoteKeys.keyName(code) + "  ·  now: " + RemoteKeys.describe(this, RemoteKeys.action(this, code)));
+-        addRow("Open an app", null, () -> openKeyApps(code), false);
+-        addRow("Inputs", null, () -> setKey(code, RemoteKeys.INPUTS), false);
++        beginMenu(P_CONTROL, RemoteKeys.keyName(code) + "  ·  nyní: " + RemoteKeys.describe(this, RemoteKeys.action(this, code)));
++        addRow("Otevřít aplikaci", null, () -> openKeyApps(code), false);
++        addRow("Vstupy", null, () -> setKey(code, RemoteKeys.INPUTS), false);
+         addRow("Talkies", null, () -> setKey(code, RemoteKeys.HOME), false);
+-        addRow("Do nothing", null, () -> setKey(code, RemoteKeys.NONE), false);
+-        if (RemoteKeys.action(this, code) != null) addRow("Back to normal", null, () -> setKey(code, null), false);
++        addRow("Nedělat nic", null, () -> setKey(code, RemoteKeys.NONE), false);
++        if (RemoteKeys.action(this, code) != null) addRow("Výchozí funkce", null, () -> setKey(code, null), false);
+         showMenu(420);
+     }
+ 
+     private void openKeyApps(int code) {
+-        beginMenu(P_CONTROL, "Open which app?");
++        beginMenu(P_CONTROL, "Kterou aplikaci otevřít?");
+         for (AppEntry a : apps) addRow(a.label, null, () -> setKey(code, RemoteKeys.APP + a.pkg), false);
+         showMenu(360);
+     }
+@@ -1866,7 +1724,7 @@ public class HomeActivity extends Activity {
+         background.execute(() -> {
+             String st;
+             if (Settings.Global.getInt(getContentResolver(), Settings.Global.ADB_ENABLED, 0) == 0) {
+-                st = "Off";
++                st = "Vyp.";
+             } else {
+                 boolean listening;
+                 try (java.net.Socket sock = new java.net.Socket()) {
+@@ -1875,7 +1733,7 @@ public class HomeActivity extends Activity {
+                 } catch (Exception e) {
+                     listening = false;
+                 }
+-                st = listening ? "On · port 5555" : "USB only";
++                st = listening ? "Zap. · port 5555" : "Jen USB";
+             }
+             final String r = st;
+             runOnUiThread(() -> done.accept(r));
+@@ -1883,20 +1741,20 @@ public class HomeActivity extends Activity {
+     }
+ 
+     private void openNetworkDebugging() {
+-        beginMenu(P_CONTROL, "Network debugging lets a computer on your network control this TV");
++        beginMenu(P_CONTROL, "Ladění přes síť umožňuje počítači ve vaší síti ovládat tuto TV");
+         boolean on = Settings.Global.getInt(getContentResolver(), Settings.Global.ADB_ENABLED, 0) != 0;
+         if (on && ServiceRepair.canRepair(this)) {
+-            addRow("Turn off", "computers lose access", () -> {
++            addRow("Vypnout", "počítače ztratí přístup", () -> {
+                 try {
+                     Settings.Global.putInt(getContentResolver(), Settings.Global.ADB_ENABLED, 0);
+-                    Toast.makeText(this, "Network debugging is off. Turn it on again in Developer options.", Toast.LENGTH_LONG).show();
++                    Toast.makeText(this, "Ladění přes síť je vypnuté. Znovu ho zapnete v Možnostech pro vývojáře.", Toast.LENGTH_LONG).show();
+                 } catch (RuntimeException e) {
+                     Log.w(TAG, "Couldn't turn off debugging: " + e);
+                     start(new Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS));
+                 }
+             }, false);
+         }
+-        addRow("Developer options", null, () -> start(new Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)), false);
++        addRow("Možnosti pro vývojáře", null, () -> start(new Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)), false);
+         showMenu(460);
+     }
+ 
+@@ -1920,11 +1778,11 @@ public class HomeActivity extends Activity {
+         beginMenu(P_CONTROL, a.label);
+         menuTile = tile;
+         menuClosed = () -> { if (z == Z_DOCK) focusDock(di); else focusGrid(gi); };
+-        addRow("Move", null, this::startMove, false);
++        addRow("Přesunout", null, this::startMove, false);
+         if (canUninstall(a.pkg)) {
+-            addRow("Uninstall", null, () -> start(new Intent(Intent.ACTION_DELETE, Uri.parse("package:" + a.pkg))), false);
++            addRow("Odinstalovat", null, () -> start(new Intent(Intent.ACTION_DELETE, Uri.parse("package:" + a.pkg))), false);
+         }
+-        addRow("App info", null, () -> start(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
++        addRow("Informace o aplikaci", null, () -> start(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                 Uri.parse("package:" + a.pkg))), false);
+         showMenu(240);
+     }
+@@ -1959,9 +1817,9 @@ public class HomeActivity extends Activity {
+         beginMenu(P_CONTROL, p.title);
+         menuTile = z == Z_PICKS ? picksRow.anchorCard() : chanCards.get(r).get(c);
+         menuClosed = () -> { if (z == Z_PICKS) focusPicks(anchor); else focusChan(r, c); };
+-        addRow("Remove from Continue", null, () -> removeFromContinue(p), false);
++        addRow("Odebrat z řady Pokračovat", null, () -> removeFromContinue(p), false);
+         Intent app = p.pkg == null ? null : pm.getLeanbackLaunchIntentForPackage(p.pkg);
+-        if (app != null) addRow("Open " + Channels.label(pm, p.pkg), null, () -> start(app), false);
++        if (app != null) addRow("Otevřít " + Channels.label(pm, p.pkg), null, () -> start(app), false);
+         showMenu(320);
+     }
+ 
+@@ -1991,45 +1849,19 @@ public class HomeActivity extends Activity {
+ 
+     // ---------------------------------------------------------------- network
+ 
+-    private String lastSpeed = "Test now";
+-    private boolean speedTesting;
+-
+     /** "TPG 5G", "Ethernet", or "Offline". The Wi-Fi name needs the location permission (granted by the install script). */
+     private String networkName() {
+         ConnectivityManager cm = getSystemService(ConnectivityManager.class);
+         NetworkCapabilities caps = cm == null ? null : cm.getNetworkCapabilities(cm.getActiveNetwork());
+-        if (caps == null) return "Offline";
++        if (caps == null) return "Bez připojení";
+         if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) return "Ethernet";
+-        if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return "Connected";
++        if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return "Připojeno";
+         android.net.wifi.WifiManager wm = getApplicationContext().getSystemService(android.net.wifi.WifiManager.class);
+         String ssid = wm == null || wm.getConnectionInfo() == null ? null : wm.getConnectionInfo().getSSID();
+         if (ssid == null || ssid.equals("<unknown ssid>")) return "Wi-Fi";
+         return ssid.replaceAll("^\"|\"$", "");
+     }
+ 
+-    /** A few seconds' download from Cloudflare; the row shows "Testing…", then "87 Mbps". Idea from Matinee (MIT). */
+-    private void runSpeedTest(View row) {
+-        if (speedTesting) return;
+-        speedTesting = true;
+-        setStatus(row, "Testing…");
+-        new Thread(() -> {
+-            String result;
+-            try {
+-                double mbps = SpeedTest.downloadMbps();
+-                result = (mbps >= 100 ? String.valueOf(Math.round(mbps)) : String.format(Locale.US, "%.1f", mbps)) + " Mbps";
+-            } catch (Exception e) {
+-                Log.w(TAG, "Speed test failed: " + e);
+-                result = "Couldn't test";
+-            }
+-            final String r = result;
+-            runOnUiThread(() -> {
+-                speedTesting = false;
+-                lastSpeed = r;
+-                if (row.isAttachedToWindow()) setStatus(row, r);
+-            });
+-        }, "speed-test").start();
+-    }
+-
+     // ---------------------------------------------------------------- app updates
+ 
+     /** The bell shows while the Play Store has updates waiting (Updates, fed by WatchService). */
+@@ -2044,7 +1876,7 @@ public class HomeActivity extends Activity {
+     private void openUpdates() {
+         List<Updates.Item> list = Updates.list();
+         if (list.isEmpty()) return;
+-        beginMenu(P_BELL, "App updates");
++        beginMenu(P_BELL, "Aktualizace aplikací");
+         for (Updates.Item it : list) {
+             String label = it.title.isEmpty() ? it.text : it.title;
+             addRow(label, it.title.isEmpty() ? null : shorten(it.text, 34), () -> {
+@@ -2066,28 +1898,26 @@ public class HomeActivity extends Activity {
+ 
+     // Ported from tv-vibehack's launcher (pr/control-center, MIT); see THIRD_PARTY_NOTICES.md.
+     private void openControlCenter() {
+-        beginMenu(P_CONTROL, "Control Center");
++        beginMenu(P_CONTROL, "Ovládací centrum");
+         final View[] timer = new View[1];
+-        timer[0] = addRow("Sleep timer", sleepStatus(), () -> {
++        timer[0] = addRow("Časovač vypnutí", sleepStatus(), () -> {
+             if (!Sleep.available()) { needsTurnOffSetup(); return; }
+             Sleep.cycle(this);
+             setStatus(timer[0], sleepStatus());
+         }, true);
+-        addRow("Turn off now", null, () -> { if (!Sleep.now()) needsTurnOffSetup(); }, false);
++        addRow("Vypnout TV", null, () -> { if (!Sleep.now()) needsTurnOffSetup(); }, false);
+         final View[] mem = new View[1];
+-        mem[0] = addRow("Free up memory", availableMb() + " MB free", () -> freeMemory(mem[0]), true);
+-        addRow("Network", networkName(), () -> start(new Intent(Settings.ACTION_WIFI_SETTINGS)), false);
+-        final View[] speed = new View[1];
+-        speed[0] = addRow("Speed test", lastSpeed, () -> runSpeedTest(speed[0]), true);
+-        addRow("Sound output", soundbarConnected() ? "Soundbar" : "TV speakers", () -> {
++        mem[0] = addRow("Uvolnit paměť", availableMb() + " MB volné", () -> freeMemory(mem[0]), true);
++        addRow("Síť", networkName(), () -> start(new Intent(Settings.ACTION_WIFI_SETTINGS)), false);
++        addRow("Výstup zvuku", soundbarConnected() ? "Soundbar" : "Reproduktory TV", () -> {
+             Intent i = new Intent().setClassName("com.android.tv.settings", "com.android.tv.settings.device.sound.SoundActivity");
+             if (pm.resolveActivity(i, 0) == null) i = new Intent(Settings.ACTION_SOUND_SETTINGS);
+             start(i);
+         }, false);
+-        addRow("Screensaver", null, () -> start(new Intent(Intent.ACTION_MAIN)
++        addRow("Spořič obrazovky", null, () -> start(new Intent(Intent.ACTION_MAIN)
+                 .setClassName("com.android.systemui", "com.android.systemui.Somnambulator")), false);
+         final View[] look = new View[1];
+-        look[0] = addRow("Appearance", APPEARANCE[prefs.getInt("appearance", 0)], () -> {
++        look[0] = addRow("Vzhled", APPEARANCE[prefs.getInt("appearance", 0)], () -> {
+             int mode = (prefs.getInt("appearance", 0) + 1) % APPEARANCE.length;
+             prefs.edit().putInt("appearance", mode).apply();
+             setStatus(look[0], APPEARANCE[mode]);
+@@ -2100,55 +1930,53 @@ public class HomeActivity extends Activity {
+             focusMenu(menuIdx);
+         }, true);
+         final View[] fy = new View[1];
+-        fy[0] = addRow("For You", forYou ? "Shown" : "Hidden", () -> {
++        fy[0] = addRow("Pro vás", forYou ? "Zobrazeno" : "Skryto", () -> {
+             forYou = !forYou;
+             prefs.edit().putBoolean("for_you", forYou).apply();
+-            setStatus(fy[0], forYou ? "Shown" : "Hidden");
++            setStatus(fy[0], forYou ? "Zobrazeno" : "Skryto");
+             applyForYou();
+             tabIdx = TAB_TRENDING;
+             buildPicksRow(0);
+             if (forYou) refreshOnline();
+         }, true);
+-        addRow("Channels", null, this::openChannelsEditor, false);
+-        addRow("Remote keys", RemoteKeys.all(this).isEmpty() ? null : RemoteKeys.all(this).size() + " set",
++        addRow("Kanály", null, this::openChannelsEditor, false);
++        addRow("Tlačítka ovladače", RemoteKeys.all(this).isEmpty() ? null : "nastaveno: " + RemoteKeys.all(this).size(),
+                 this::openRemoteKeys, false);
+         final View[] adb = new View[1];
+-        adb[0] = addRow("Network debugging", "Checking…", this::openNetworkDebugging, false);
++        adb[0] = addRow("Ladění přes síť", "Zjišťuji…", this::openNetworkDebugging, false);
+         checkNetworkDebugging(st -> { if (adb[0].isAttachedToWindow()) setStatus(adb[0], st); });
+         // Switch between Talkies and another launcher with Android's Home app chooser.
+-        addRow("Home app", currentHomeName(), () -> start(new Intent(Settings.ACTION_HOME_SETTINGS)), false);
++        addRow("Domovská aplikace", currentHomeName(), () -> start(new Intent(Settings.ACTION_HOME_SETTINGS)), false);
+         // Off by default: looking a video up means sending its title and channel to YouTube.
+         final View[] yt = new View[1];
+-        yt[0] = addRow("Sharp YouTube pictures", prefs.getBoolean("youtube_art", false) ? "On" : "Off", () -> {
++        yt[0] = addRow("Ostré obrázky z YouTube", prefs.getBoolean("youtube_art", false) ? "Zap." : "Vyp.", () -> {
+             boolean on = !prefs.getBoolean("youtube_art", false);
+             prefs.edit().putBoolean("youtube_art", on).apply();
+-            setStatus(yt[0], on ? "On" : "Off");
++            setStatus(yt[0], on ? "Zap." : "Vyp.");
+             if (on) refreshOnline();
+         }, true);
+-        addRow("About", null, this::openAbout, false);
++        addRow("O aplikaci", null, this::openAbout, false);
+         showMenu(350);
+     }
+ 
+     /** Credits for the data Talkies shows; TMDB's wording is what its terms ask for. */
+     private void openAbout() {
+-        beginMenu(P_CONTROL, "Talkies · MIT License");
++        beginMenu(P_CONTROL, "Talkies · licence MIT");
+         String[][] credits = {
+-                {"Weather", "Open-Meteo.com (CC BY 4.0)"},
+-                {"Airport temperatures", "aviationweather.gov (NOAA)"},
+-                {"Cricket scores", "CricketData.org"},
+-                {"Speed test", "Cloudflare"},
+-                {"Code from", "tv-vibehack/CleanYourTV, Free My TV, Matinee"},
+-                {"Font", "Outfit (SIL OFL)"},
++                {"Počasí", "Open-Meteo.com (CC BY 4.0)"},
++                {"Teploty z letišť", "aviationweather.gov (NOAA)"},
++                {"Kód z projektů", "tv-vibehack/CleanYourTV, Free My TV, Matinee"},
++                {"Písmo", "Outfit (SIL OFL)"},
+         };
+         // TMDB's terms ask for its logo with the credit: on the first row, smaller than anything identifying Talkies.
+-        LinearLayout picks = (LinearLayout) addRow("Picks", null, () -> { }, true);
++        LinearLayout picks = (LinearLayout) addRow("Tipy", null, () -> { }, true);
+         ImageView logo = new ImageView(this);
+         logo.setImageResource(R.drawable.tmdb_logo);
+         logo.setContentDescription("TMDB");
+         picks.addView(logo, picks.getChildCount() - 1, new LinearLayout.LayoutParams(px(123), px(16)));
+         // TMDB's notice, in full: a row of its own that wraps.
+-        View notice = addRow("This application uses TMDB and the TMDB APIs but is not endorsed, certified, or otherwise "
+-                + "approved by TMDB.", null, () -> { }, true);
++        View notice = addRow("Tato aplikace používá TMDB a rozhraní TMDB API, ale TMDB ji nepodporuje, necertifikoval "
++                + "ani jinak neschválil.", null, () -> { }, true);
+         TextView nt = notice.findViewById(R.id.input_label);
+         nt.setSingleLine(false);
+         nt.setMaxLines(3);
+@@ -2170,7 +1998,7 @@ public class HomeActivity extends Activity {
+     }
+ 
+     private void fillChannelsMenu() {
+-        beginMenu(P_CONTROL, "Channels  ·  OK: show or hide  ·  hold OK: move");
++        beginMenu(P_CONTROL, "Kanály  ·  OK: zobrazit/skrýt  ·  podržet OK: přesunout");
+         menuMode = MENU_CHANNELS;
+         for (Channels.Channel ch : editList) {
+             final Channels.Channel c = ch;
+@@ -2188,9 +2016,9 @@ public class HomeActivity extends Activity {
+         boolean first = true;
+         for (int i = 0; i < editList.size() && i < menuItems.size(); i++) {
+             Channels.Channel ch = editList.get(i);
+-            String status = ch.shown ? (first ? "Shown · first" : "Shown") : "Hidden";
++            String status = ch.shown ? (first ? "Zobrazeno · první" : "Zobrazeno") : "Skryto";
+             if (ch.shown) first = false;
+-            if (menuMoving && i == menuIdx) status = "Moving…";
++            if (menuMoving && i == menuIdx) status = "Přesouvání…";
+             setStatus(menuItems.get(i), status);
+         }
+     }
+@@ -2201,7 +2029,7 @@ public class HomeActivity extends Activity {
+         menuMoving = true;
+         beforeEdit = new ArrayList<>(editList);
+         channelStatuses();
+-        moveHint.setText("Moving " + editList.get(menuIdx).title + "  ·  OK to place  ·  Back to cancel");
++        moveHint.setText("Přesouvání: " + editList.get(menuIdx).title + "  ·  OK umístit  ·  Zpět zrušit");
+         moveHint.setAlpha(0f);
+         moveHint.setVisibility(View.VISIBLE);
+         moveHint.animate().alpha(1f).setDuration(150).start();
+@@ -2251,13 +2079,13 @@ public class HomeActivity extends Activity {
+ 
+     private String sleepStatus() {
+         int left = Sleep.minutesLeft(this);
+-        return left > 0 ? left + " min left" : "Off";
++        return left > 0 ? "zbývá " + left + " min" : "Vyp.";
+     }
+ 
+     /** Turning off needs the accessibility helper, which only you can switch on. Take you there. */
+     private void needsTurnOffSetup() {
+-        Toast.makeText(this, "To turn the TV off, switch on \"" + getString(R.string.sleep_service_label)
+-                + "\" in Accessibility", Toast.LENGTH_LONG).show();
++        Toast.makeText(this, "Pro vypínání TV zapněte v Přístupnosti službu „" + getString(R.string.sleep_service_label)
++                + "“", Toast.LENGTH_LONG).show();
+         closeMenu();
+         Intent i = new Intent().setClassName("com.android.tv.settings", "com.android.tv.settings.oemlink.AccessibilitySettingsActivity");
+         if (pm.resolveActivity(i, 0) == null) i = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+@@ -2286,7 +2114,7 @@ public class HomeActivity extends Activity {
+     private void freeMemory(View row) {
+         ActivityManager am = getSystemService(ActivityManager.class);
+         long before = availableMb();
+-        setStatus(row, "Freeing…");
++        setStatus(row, "Uvolňuji…");
+         for (ApplicationInfo ai : pm.getInstalledApplications(0)) {
+             if ((ai.flags & ApplicationInfo.FLAG_SYSTEM) != 0) continue;
+             if (ai.packageName.equals(getPackageName())) continue;
+@@ -2294,7 +2122,7 @@ public class HomeActivity extends Activity {
+         }
+         row.postDelayed(() -> {
+             long after = availableMb();
+-            setStatus(row, "Freed " + Math.max(0, after - before) + " MB · " + after + " MB free");
++            setStatus(row, "Uvolněno " + Math.max(0, after - before) + " MB · " + after + " MB volné");
+         }, 800);
+     }
+ 
+@@ -2304,7 +2132,7 @@ public class HomeActivity extends Activity {
+         boolean online = caps != null && (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+                 || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET));
+         icons[P_WIFI].setAlpha(online ? 1f : 0.45f);
+-        icons[P_WIFI].setContentDescription(online ? "Wi-Fi" : "Wi-Fi: offline");
++        icons[P_WIFI].setContentDescription(online ? "Wi-Fi" : "Wi-Fi: bez připojení");
+     }
+ 
+     /** Your own wallpaper (files/wallpaper.jpg|png|webp) replaces the soft backdrop. */
+@@ -2372,17 +2200,10 @@ public class HomeActivity extends Activity {
+         weatherLine = weather.cached();
+         updateInfo();
+         refreshOnline();
+-        background.execute(() -> {
+-            List<Cricket.Match> saved = cricket.cached();
+-            runOnUiThread(() -> {
+-                if (matches.isEmpty() && !saved.isEmpty()) onMatches(saved);
+-                refreshOnline();
+-            });
+-        });
+         // Right after the TV starts, its storage can be late: the saved picks may only now be readable.
+-        if (trendPicks.isEmpty() || indiaPicks.isEmpty()) {
++        if (trendPicks.isEmpty() || localPicks.isEmpty()) {
+             trendPicks = trending.cached(Trending.TRENDING);
+-            indiaPicks = trending.cached(Trending.INDIA);
++            localPicks = trending.cached(Trending.LOCAL);
+             backToTrending();
+         }
+         // Something new may have been watched while we were away.
+@@ -2415,7 +2236,7 @@ public class HomeActivity extends Activity {
+     @Override
+     protected void onResume() {
+         super.onResume();
+-        tabs[2].setText("New in " + Region.name(Region.country(this)));  // the country can change (Region)
++        tabs[2].setText(Region.newIn(Region.country(this)));  // the country can change (Region)
+         inFront = true;
+         root.post(this::snapRing);
+         refreshOnline();   // back on the home screen: catch up on anything that went stale meanwhile
+@@ -2429,7 +2250,7 @@ public class HomeActivity extends Activity {
+     }
+ 
+     /**
+-     * Network refreshes (cricket, weather, picks) run only while the home screen is the app in front and the TV's
++     * Network refreshes (weather, picks) run only while the home screen is the app in front and the TV's
+      * display is on: never behind another app, under the screensaver, or in standby. Each also has its own interval.
+      */
+     private void refreshOnline() {
+@@ -2438,7 +2259,6 @@ public class HomeActivity extends Activity {
+             Log.i(TAG, "Refresh skipped: " + (!inFront ? "another app in front" : !hasWindowFocus() ? "screensaver or dialog on top" : "display off"));
+             return;
+         }
+-        cricket.refreshIfStale(this::onMatches);
+         weather.refreshIfStale(this::onWeather);
+         if (forYou) trending.refreshIfStale(this::onPicks);
+         if (prefs.getBoolean("youtube_art", false)) RecentStore.upgradeArtwork(this, () -> {
+@@ -2459,7 +2279,7 @@ public class HomeActivity extends Activity {
+     @Override
+     protected void onNewIntent(Intent intent) {
+         super.onNewIntent(intent);
+-        SleepService.learn(null);  // Home while "Waiting for a button…": stop listening
++        SleepService.learn(null);  // Home while "Čekám na tlačítko…": stop listening
+         // Home: back to the dock at the top, on the Trending tab.
+         if (menuMoving) endMenuMove(false);
+         if (zone == Z_MENU) {
+diff --git a/app/src/main/java/com/techpp/glass/Region.java b/app/src/main/java/com/techpp/glass/Region.java
+index 947b31c..cc9f63f 100644
+--- a/app/src/main/java/com/techpp/glass/Region.java
++++ b/app/src/main/java/com/techpp/glass/Region.java
+@@ -12,10 +12,10 @@ import java.util.Locale;
+ import java.util.TimeZone;
+ 
+ /**
+- * Where the TV is, for the picks (which titles stream here), cricket (which app has the rights) and the weather's
+- * °C or °F. In order: files/region.txt (a two-letter country code you can push, for a TV whose settings say
+- * otherwise), the time zone's country (where the TV actually is: many TVs are left on "English (United States)"
+- * wherever they are), the language setting's country, and finally the US.
++ * Where the TV is, for the picks (which titles stream here) and the weather's °C or °F. In order: files/region.txt
++ * (a two-letter country code you can push, for a TV whose settings say otherwise), the time zone's country (where
++ * the TV actually is: many TVs are left on "English (United States)" wherever they are), the language setting's
++ * country, and finally Czechia.
+  */
+ final class Region {
+     private static final List<String> ENGLISH = Arrays.asList("US", "GB", "AU", "CA", "NZ", "IE");
+@@ -23,7 +23,7 @@ final class Region {
+ 
+     private Region() { }
+ 
+-    /** Two-letter country code, e.g. "IN". */
++    /** Two-letter country code, e.g. "CZ". */
+     static String country(Context c) {
+         String override = override(c);
+         if (override != null) return override;
+@@ -34,7 +34,7 @@ final class Region {
+             // Unknown zone ("UTC", "GMT"): fall back to the language setting.
+         }
+         String loc = Locale.getDefault().getCountry();
+-        return loc != null && loc.matches("[A-Z]{2}") ? loc : "US";
++        return loc != null && loc.matches("[A-Z]{2}") ? loc : "CZ";
+     }
+ 
+     private static String override(Context c) {
+@@ -50,17 +50,18 @@ final class Region {
+         }
+     }
+ 
+-    /** "India", "the US", "the UK": for "New in …". */
+-    static String name(String cc) {
++    /** The "New in …" tab's label: "Novinky v Česku", or just "Novinky" for a country without a Czech form here. */
++    static String newIn(String cc) {
+         switch (cc) {
+-            case "US": return "the US";
+-            case "GB": return "the UK";
+-            case "AE": return "the UAE";
+-            case "NL": return "the Netherlands";
+-            case "PH": return "the Philippines";
+-            default:
+-                String n = new Locale("", cc).getDisplayCountry(Locale.ENGLISH);
+-                return n.isEmpty() || n.length() > 14 ? cc : n;
++            case "CZ": return "Novinky v Česku";
++            case "SK": return "Novinky na Slovensku";
++            case "DE": return "Novinky v Německu";
++            case "AT": return "Novinky v Rakousku";
++            case "PL": return "Novinky v Polsku";
++            case "HU": return "Novinky v Maďarsku";
++            case "GB": return "Novinky ve Spojeném království";
++            case "US": return "Novinky v USA";
++            default: return "Novinky";
+         }
+     }
+ 
+@@ -69,10 +70,13 @@ final class Region {
+ 
+     static boolean fahrenheit(String cc) { return FAHRENHEIT.contains(cc); }
+ 
+-    /** "Hindi", "Korean"…: a language's English name from its ISO 639-1 code, or "" when unknown. */
++    private static final Locale CZECH = new Locale("cs", "CZ");
++
++    /** "Angličtina", "Korejština"…: a language's Czech name from its ISO 639-1 code, or "" when unknown. */
+     static String language(String code) {
+         if (code == null || code.isEmpty()) return "";
+-        String n = new Locale(code).getDisplayLanguage(Locale.ENGLISH);
+-        return n.equalsIgnoreCase(code) ? "" : n;
++        String n = new Locale(code).getDisplayLanguage(CZECH);
++        if (n.isEmpty() || n.equalsIgnoreCase(code)) return "";
++        return n.substring(0, 1).toUpperCase(CZECH) + n.substring(1);
+     }
+ }
+diff --git a/app/src/main/java/com/techpp/glass/RemoteKeys.java b/app/src/main/java/com/techpp/glass/RemoteKeys.java
+index 50ece24..c122c48 100644
+--- a/app/src/main/java/com/techpp/glass/RemoteKeys.java
++++ b/app/src/main/java/com/techpp/glass/RemoteKeys.java
+@@ -15,7 +15,7 @@ import java.util.TreeMap;
+ 
+ /**
+  * Remote keys (Control Center → Remote keys): a button on the remote given another job, e.g. the Netflix button
+- * opening JioHotstar. SleepService, Talkies' accessibility service, sees the press before the TV does and does
++ * opening Netflix. SleepService, Talkies' accessibility service, sees the press before the TV does and does
+  * the job instead; buttons with no job pass through untouched. Kept in the "remote_keys" preferences as
+  * key code → action: "app:<package>", "inputs", "home" or "none". An idea from Plume and CleanYourTV.
+  */
+@@ -65,7 +65,7 @@ final class RemoteKeys {
+     /** "Prog Red", "Button 3", "Key 1201" for a vendor key Android has no name for. */
+     static String keyName(int code) {
+         String s = KeyEvent.keyCodeToString(code);
+-        if (!s.startsWith("KEYCODE_")) return "Key " + code;
++        if (!s.startsWith("KEYCODE_")) return "Tlačítko " + code;
+         StringBuilder b = new StringBuilder();
+         for (String w : s.substring(8).toLowerCase(Locale.ROOT).split("_")) {
+             if (w.isEmpty()) continue;
+@@ -76,11 +76,11 @@ final class RemoteKeys {
+     }
+ 
+     static String describe(Context c, String action) {
+-        if (action == null) return "Normal";
+-        if (action.equals(INPUTS)) return "Inputs";
++        if (action == null) return "Výchozí";
++        if (action.equals(INPUTS)) return "Vstupy";
+         if (action.equals(HOME)) return "Talkies";
+-        if (action.equals(NONE)) return "Nothing";
+-        if (action.startsWith(APP)) return "Open " + Channels.label(c.getPackageManager(), action.substring(APP.length()));
++        if (action.equals(NONE)) return "Nic";
++        if (action.startsWith(APP)) return "Otevřít " + Channels.label(c.getPackageManager(), action.substring(APP.length()));
+         return action;
+     }
+ 
+diff --git a/app/src/main/java/com/techpp/glass/SleepService.java b/app/src/main/java/com/techpp/glass/SleepService.java
+index f1434b9..1a2fa13 100644
+--- a/app/src/main/java/com/techpp/glass/SleepService.java
++++ b/app/src/main/java/com/techpp/glass/SleepService.java
+@@ -7,7 +7,6 @@ import android.accessibilityservice.AccessibilityService;
+ import android.content.Intent;
+ import android.graphics.PixelFormat;
+ import android.graphics.drawable.GradientDrawable;
+-import android.os.Bundle;
+ import android.os.Handler;
+ import android.os.Looper;
+ import android.os.SystemClock;
+@@ -18,24 +17,18 @@ import android.widget.LinearLayout;
+ import android.widget.TextView;
+ import android.util.Log;
+ import android.view.accessibility.AccessibilityEvent;
+-import android.view.accessibility.AccessibilityNodeInfo;
+-
+-import java.util.List;
+ 
+ /**
+  * Puts the TV in standby for "Turn off now" and the sleep timer. This TV has no device-admin support,
+  * so lockNow() isn't available; the accessibility "lock screen" global action does the same job.
+  *
+- * Also types a match into JioHotstar's search when a Cricket card has no direct link: JioHotstar's search
+- * links open an empty search page. It only acts for 30 s after you pick a card and looks for nothing but the search box.
+- *
+  * And keeps Talkies as the home screen while the TV's own launcher stays enabled (on Google TV the Assistant needs
+  * it: results such as "show me action movies" open on its home screen), though Android may send Home to it. So the
+  * Home key opens Talkies, and so does the built-in launcher's home screen appearing on its own (after a restart,
+  * or backing out of its pages), except within a few seconds of the Assistant, when it is showing results. The
+  * built-in launchers are found at start: system apps that can be the home screen (launchers you installed, like
+- * Projectivy, are left alone). The approach follows Matinee's HomeKeyService (MIT). Events come only from JioHotstar,
+- * those launchers and the Assistant.
++ * Projectivy, are left alone). The approach follows Matinee's HomeKeyService (MIT). Events come only from those
++ * launchers and the Assistant.
+  *
+  * Keys: it filters Home (above), OK while the sleep warning is up ("15 more minutes"), and remote buttons you've
+  * given a job in Control Center → Remote keys (RemoteKeys); every other key passes through untouched.
+@@ -45,11 +38,7 @@ import java.util.List;
+  */
+ public class SleepService extends AccessibilityService {
+     private static final String TAG = "GlassSleep";
+-    private static final String SEARCH_BAR = Cricket.HOTSTAR + ":id/search_bar";
+-    private static final long SEARCH_WAIT_MS = 30_000;
+     private static SleepService running;
+-    private static String pendingSearch;
+-    private static long pendingUntil;
+     private static final String ASSISTANT = "com.google.android.katniss";
+     /** The built-in launchers' home screens (package/class), found at start. */
+     private final java.util.Set<String> stockHomes = new java.util.HashSet<>();
+@@ -68,14 +57,6 @@ public class SleepService extends AccessibilityService {
+         return running != null && running.performGlobalAction(GLOBAL_ACTION_LOCK_SCREEN);
+     }
+ 
+-    /** Types {@code text} into JioHotstar's search box once it shows up. False if the service is off. */
+-    static boolean searchHotstar(String text) {
+-        if (running == null) return false;
+-        pendingSearch = text;
+-        pendingUntil = SystemClock.uptimeMillis() + SEARCH_WAIT_MS;
+-        return true;
+-    }
+-
+     @Override protected void onServiceConnected() {
+         running = this;
+         findStockHomes();
+@@ -148,7 +129,7 @@ public class SleepService extends AccessibilityService {
+             warningText.setTypeface(getResources().getFont(R.font.outfit));
+             warningText.setFontVariationSettings("'wght' 600");
+             TextView hint = new TextView(this);
+-            hint.setText("Press OK for 15 more minutes");
++            hint.setText("Stiskněte OK pro dalších 15 minut");
+             hint.setTextColor(0xFFA1A1A6);
+             hint.setTextSize(14);
+             hint.setTypeface(getResources().getFont(R.font.outfit));
+@@ -179,7 +160,7 @@ public class SleepService extends AccessibilityService {
+             Sleep.fire(this);
+             return;
+         }
+-        if (warningText != null) warningText.setText("Turning off in " + ((left + 999) / 1000) + " s");
++        if (warningText != null) warningText.setText("Vypnutí za " + ((left + 999) / 1000) + " s");
+         main.postDelayed(tick, Math.max(50, left % 1000 == 0 ? 1000 : left % 1000));
+     }
+ 
+@@ -197,8 +178,8 @@ public class SleepService extends AccessibilityService {
+ 
+     /**
+      * System apps that can be the home screen, other than Talkies and the boot-time fallbacks (negative priority):
+-     * Google TV's launcher, Android TV's, or the TV maker's. Window events are then limited to them, JioHotstar and
+-     * the Assistant.
++     * Google TV's launcher, Android TV's, or the TV maker's. Window events are then limited to them and the
++     * Assistant.
+      */
+     private void findStockHomes() {
+         stockHomes.clear();
+@@ -213,7 +194,6 @@ public class SleepService extends AccessibilityService {
+             stockPackages.add(ai.packageName);
+         }
+         java.util.Set<String> watched = new java.util.HashSet<>(stockPackages);
+-        watched.add(Cricket.HOTSTAR);
+         watched.add(ASSISTANT);
+         android.accessibilityservice.AccessibilityServiceInfo info = getServiceInfo();
+         if (info != null) {
+@@ -257,19 +237,6 @@ public class SleepService extends AccessibilityService {
+                 else assistantAt = SystemClock.elapsedRealtime();  // browsing the results: keep them
+             }
+         }
+-        String text = pendingSearch;
+-        if (text == null) return;
+-        if (SystemClock.uptimeMillis() > pendingUntil) { pendingSearch = null; return; }
+-        AccessibilityNodeInfo root = getRootInActiveWindow();
+-        if (root == null || !Cricket.HOTSTAR.contentEquals(root.getPackageName())) return;
+-        List<AccessibilityNodeInfo> found = root.findAccessibilityNodeInfosByViewId(SEARCH_BAR);
+-        if (found.isEmpty()) return;
+-        Bundle args = new Bundle();
+-        args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text);
+-        if (found.get(0).performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
+-            pendingSearch = null;
+-            Log.i(TAG, "Searched JioHotstar for " + text);
+-        }
+     }
+ 
+     @Override public void onInterrupt() { }
+diff --git a/app/src/main/java/com/techpp/glass/SpeedTest.java b/app/src/main/java/com/techpp/glass/SpeedTest.java
+deleted file mode 100644
+index d1eca59..0000000
+--- a/app/src/main/java/com/techpp/glass/SpeedTest.java
++++ /dev/null
+@@ -1,46 +0,0 @@
+-package com.techpp.glass;
+-
+-// Adapted from Matinee (app/src/main/java/com/tcltv/sahne/system/SpeedTest.kt), MIT License,
+-// Copyright (c) 2026 Yiğit Can Polat. See THIRD_PARTY_NOTICES.md.
+-
+-import java.io.IOException;
+-import java.io.InputStream;
+-import java.net.HttpURLConnection;
+-import java.net.URL;
+-
+-/**
+- * Download speed, read from Cloudflare's public speed-test endpoint for a few seconds. Nothing is uploaded and the
+- * request carries no identifiers beyond any HTTPS request's. Blocking: call off the main thread.
+- */
+-final class SpeedTest {
+-    // The endpoint refuses 100 MB or more; on lines fast enough to finish early, the elapsed time is used instead.
+-    private static final String URL_DOWNLOAD = "https://speed.cloudflare.com/__down?bytes=90000000";
+-    private static final long MEASURE_NANOS = 4_000_000_000L;
+-
+-    private SpeedTest() { }
+-
+-    /** Megabits per second. */
+-    static double downloadMbps() throws IOException {
+-        HttpURLConnection c = (HttpURLConnection) new URL(URL_DOWNLOAD).openConnection();
+-        try {
+-            c.setConnectTimeout(5000);
+-            c.setReadTimeout(5000);
+-            c.setUseCaches(false);
+-            if (c.getResponseCode() / 100 != 2) throw new IOException("HTTP " + c.getResponseCode());
+-            byte[] buf = new byte[64 * 1024];
+-            long total = 0, start = System.nanoTime();
+-            try (InputStream in = c.getInputStream()) {
+-                while (System.nanoTime() - start < MEASURE_NANOS) {
+-                    int n = in.read(buf);
+-                    if (n < 0) break;
+-                    total += n;
+-                }
+-            }
+-            double seconds = (System.nanoTime() - start) / 1e9;
+-            if (seconds <= 0 || total == 0) throw new IOException("No data received");
+-            return total * 8 / seconds / 1_000_000;
+-        } finally {
+-            c.disconnect();
+-        }
+-    }
+-}
+diff --git a/app/src/main/java/com/techpp/glass/Trending.java b/app/src/main/java/com/techpp/glass/Trending.java
+index f90fdbc..49f8358 100644
+--- a/app/src/main/java/com/techpp/glass/Trending.java
++++ b/app/src/main/java/com/techpp/glass/Trending.java
+@@ -52,9 +52,11 @@ final class Trending {
+     private static final long REFRESH_MS = 6 * 3600_000L, RETRY_MS = 30 * 60_000L;
+     private static final int MAX_PICKS = 24, MAX_CHECKS = 72;
+     static final int SHOWN = 4;
+-    static final String TRENDING = "trending", INDIA = "india";
++    static final String TRENDING = "trending", LOCAL = "local";
++    /** Language for TMDB titles, overviews and genre names. */
++    private static final String LANG = "cs-CZ";
+     /** Bump when picks.json changes shape; the next home screen refreshes right away. */
+-    private static final int CACHE_VERSION = 6;
++    private static final int CACHE_VERSION = 7;
+     /** TMDB genre ids → names, fetched once per refresh. */
+     private final Map<Integer, String> genres = new java.util.HashMap<>();
+ 
+@@ -62,14 +64,8 @@ final class Trending {
+     private static final String[][] SERVICES = {
+         {"netflix", "com.netflix.ninja", "Netflix"},
+         {"prime video", "com.amazon.amazonvideo.livingroom", "Prime Video"},
+-        {"hotstar", "in.startv.hotstar", "JioHotstar"},
+-        {"zee5", "com.graymatrix.did", "ZEE5"},
+-        {"sony liv", "com.sonyliv", "SonyLIV"},
+-        {"sonyliv", "com.sonyliv", "SonyLIV"},
+         {"apple tv", "com.apple.atve.androidtv.appletv", "Apple TV"},
+-        {"mx player", "com.mxtech.videoplayer.television", "MX Player"},
+-        {"airtel xstream", "tv.airtel.xstream.tvapp", "Xstream Play"},
+-        {"fancode", "com.fancode.tv", "FanCode"},
++        {"voyo", "net.cme.voyo.cz.tvapp", "Voyo"},
+         {"disney plus", "com.disney.disneyplus", "Disney+"},
+         {"hulu", "com.hulu.livingroomplus", "Hulu"},
+         {"max", "com.wbd.stream", "Max"},
+@@ -88,9 +84,9 @@ final class Trending {
+         transient String backdropPath, posterPath;  // TMDB image paths, while a refresh downloads them
+         long at;            // Recently watched: when it was last watched
+         String intentUri;   // Recently watched (Watch Next): opens the right title or episode
+-        String meta = "";   // the line under a big card, e.g. "Film · Action · Telugu · Netflix"
++        String meta = "";   // the line under a big card, e.g. "Film · Akční · Korejština · Netflix"
+         float progress = -1; // Continue: how far in (0–1), or -1 when unknown
+-        Object extra;        // Cricket: the Cricket.Match this card shows
++        Object extra;        // spare: extra data a card may carry (unused)
+ 
+         String key() { return "pick:" + tab + ":" + kind + ":" + id; }
+     }
+@@ -161,7 +157,7 @@ final class Trending {
+         return out;
+     }
+ 
+-    /** Hours since the epoch in local time, so the picks change on the hour here (not at :30 in India). */
++    /** Hours since the epoch in local time, so the picks change on the hour here (not at :30 in another time zone). */
+     static long localHour() {
+         long now = System.currentTimeMillis();
+         return (now + java.util.TimeZone.getDefault().getOffset(now)) / 3600_000L;
+@@ -226,20 +222,20 @@ final class Trending {
+     }
+ 
+     /**
+-     * Genre names and India's list of streaming services hardly ever change: kept for a week (prefs "setup"), which
++     * Genre names and the country's list of streaming services hardly ever change: kept for a week (prefs "setup"), which
+      * saves four requests per refresh.
+      */
+     private JSONObject setup(String key) throws Exception {
+         try {
+             JSONObject saved = new JSONObject(prefs.getString("setup", "{}"));
+             if (System.currentTimeMillis() - saved.optLong("at") < SETUP_MS && saved.has("tv_providers")
+-                    && region.equals(saved.optString("region"))) return saved;
++                    && region.equals(saved.optString("region")) && LANG.equals(saved.optString("lang"))) return saved;
+         } catch (Exception ignored) {
+             // Fetch afresh.
+         }
+-        JSONObject o = new JSONObject().put("at", System.currentTimeMillis()).put("region", region);
++        JSONObject o = new JSONObject().put("at", System.currentTimeMillis()).put("region", region).put("lang", LANG);
+         for (String kind : new String[]{"movie", "tv"}) {
+-            o.put(kind + "_genres", get(key, "/genre/" + kind + "/list?language=en").getJSONArray("genres"));
++            o.put(kind + "_genres", get(key, "/genre/" + kind + "/list?language=" + LANG).getJSONArray("genres"));
+             o.put(kind + "_providers", get(key, "/watch/providers/" + kind + "?watch_region=" + region).getJSONArray("results"));
+         }
+         prefs.edit().putString("setup", o.toString()).apply();
+@@ -253,7 +249,7 @@ final class Trending {
+             JSONArray g = setup.getJSONArray(kind + "_genres");
+             for (int i = 0; i < g.length(); i++) genres.put(g.getJSONObject(i).getInt("id"), g.getJSONObject(i).getString("name"));
+         }
+-        // 1. Which of TMDB's Indian streaming services are installed here.
++        // 1. Which of TMDB's streaming services for this country are installed here.
+         Map<Integer, String[]> services = new LinkedHashMap<>();
+         for (String kind : new String[]{"movie", "tv"}) {
+             JSONArray a = setup.getJSONArray(kind + "_providers");
+@@ -269,7 +265,7 @@ final class Trending {
+         // 2. Candidates for each tab, then 3. keep those that stream on an installed app (and fetch backdrops).
+         StringBuilder ids = new StringBuilder();
+         for (int id : services.keySet()) ids.append(ids.length() == 0 ? "" : "|").append(id);
+-        String common = "&watch_region=" + region + "&with_watch_monetization_types=flatrate&include_adult=false"
++        String common = "&language=" + LANG + "&watch_region=" + region + "&with_watch_monetization_types=flatrate&include_adult=false"
+                 + "&sort_by=popularity.desc&with_watch_providers=" + ids;
+ 
+         // The six candidate lists, all at once.
+@@ -284,23 +280,23 @@ final class Trending {
+         java.util.concurrent.Future<JSONObject> englishShows = later(key, "/discover/tv?with_original_language=en" + popular);
+ 
+         // "New in …" first, so Trending can leave its titles out.
+-        List<Pick> india = keepMixed(key, services, INDIA, new HashSet<>(), new int[]{1},
++        List<Pick> local = keepMixed(key, services, LOCAL, new HashSet<>(), new int[]{1},
+                 merge(tag(newFilms.get().getJSONArray("results"), "movie"), tag(newShows.get().getJSONArray("results"), "tv")));
+-        Set<String> inIndia = new HashSet<>();
+-        for (Pick p : india) inIndia.add(p.kind + p.id);
++        Set<String> inLocal = new HashSet<>();
++        for (Pick p : local) inLocal.add(p.kind + p.id);
+ 
+         // Trending: popular titles from this country and popular English titles, two of the first for each one of the
+         // second. Where the country's own titles are English anyway (US, UK…), just what's popular here.
+-        List<JSONObject> local = merge(tag(localFilms.get().getJSONArray("results"), "movie"),
++        List<JSONObject> localTitles = merge(tag(localFilms.get().getJSONArray("results"), "movie"),
+                 tag(localShows.get().getJSONArray("results"), "tv"));
+         List<JSONObject> english = merge(tag(englishFilms.get().getJSONArray("results"), "movie"),
+                 tag(englishShows.get().getJSONArray("results"), "tv"));
+         List<Pick> trend = Region.englishSpeaking(region)
+-                ? keepMixed(key, services, TRENDING, inIndia, new int[]{0, 1}, english, local)
+-                : keepMixed(key, services, TRENDING, inIndia, new int[]{0, 0, 1}, local, english);
++                ? keepMixed(key, services, TRENDING, inLocal, new int[]{0, 1}, english, localTitles)
++                : keepMixed(key, services, TRENDING, inLocal, new int[]{0, 0, 1}, localTitles, english);
+ 
+         List<Pick> picks = new ArrayList<>(trend);
+-        picks.addAll(india);
++        picks.addAll(local);
+         save(downloadImages(picks));
+     }
+ 
+@@ -361,7 +357,7 @@ final class Trending {
+     }
+ 
+     /**
+-     * Up to MAX_PICKS titles that stream in India on an installed app, taken from the queues in the given pattern
++     * Up to MAX_PICKS titles that stream in this country on an installed app, taken from the queues in the given pattern
+      * ({0, 0, 1} = two from the first queue, then one from the second). When a queue runs dry the others fill in,
+      * so the mix only drifts if TMDB really has too few. Titles in {@code exclude} are skipped.
+      */
+@@ -398,7 +394,7 @@ final class Trending {
+         return picks;
+     }
+ 
+-    /** The title as a pick if it streams (subscription) in India on an installed app; downloads its backdrop. */
++    /** The title as a pick if it streams (subscription) in this country on an installed app; downloads its backdrop. */
+     private Pick accept(String key, Map<Integer, String[]> services, String tab, JSONObject o) throws Exception {
+         String kind = o.getString("_kind");
+         java.util.concurrent.Future<JSONObject> lookup = providerLookups.get(kind + o.getInt("id"));
+@@ -422,13 +418,14 @@ final class Trending {
+         p.title = o.optString(kind.equals("tv") ? "name" : "title", "");
+         p.pkg = s[1];
+         p.service = s[2];
+-        // "Film · Action · Telugu · Netflix": kind, first genre, language when not English, the app.
+-        StringBuilder m = new StringBuilder(kind.equals("tv") ? "Series" : "Film");
++        // "Film · Akční · Korejština · Netflix": kind, first genre, language when not English, the app.
++        StringBuilder m = new StringBuilder(kind.equals("tv") ? "Seriál" : "Film");
+         JSONArray g = o.optJSONArray("genre_ids");
+         if (g != null && g.length() > 0 && genres.containsKey(g.getInt(0))) {
+-            m.append(" · ").append(genres.get(g.getInt(0)).replace("Action & Adventure", "Action").replace("Sci-Fi & Fantasy", "Sci-Fi"));
++            m.append(" · ").append(genres.get(g.getInt(0)).replace("Action & Adventure", "Akční").replace("Sci-Fi & Fantasy", "Sci-Fi")
++                    .replace("Akční a dobrodružný", "Akční").replace("Sci-Fi a fantasy", "Sci-Fi"));
+         }
+-        if (!p.lang.equals("en") && !Region.language(p.lang).isEmpty()) m.append(" · ").append(Region.language(p.lang));
++        if (!p.lang.equals("en") && !p.lang.equals("cs") && !Region.language(p.lang).isEmpty()) m.append(" · ").append(Region.language(p.lang));
+         m.append(" · ").append(p.service);
+         p.meta = m.toString();
+         // Pictures are downloaded once all picks are chosen (downloadImages), several at a time.
+diff --git a/app/src/main/java/com/techpp/glass/WatchNext.java b/app/src/main/java/com/techpp/glass/WatchNext.java
+index 211d154..e04f322 100644
+--- a/app/src/main/java/com/techpp/glass/WatchNext.java
++++ b/app/src/main/java/com/techpp/glass/WatchNext.java
+@@ -63,10 +63,10 @@ final class WatchNext {
+                 if (!browsable || pkg == null || c.getPackageManager().getLeanbackLaunchIntentForPackage(pkg) == null) continue;
+ 
+                 String title = str(cur, 1), episode = str(cur, 2), season = str(cur, 3), number = str(cur, 4);
+-                // The line under the card: "Season 2 · Episode 1 · Prime Video" (or the episode's name).
++                // The line under the card: "Řada 2 · Díl 1 · Prime Video" (or the episode's name).
+                 StringBuilder m = new StringBuilder();
+-                if (!season.isEmpty()) m.append("Season ").append(season);
+-                if (!number.isEmpty()) m.append(m.length() > 0 ? " · " : "").append("Episode ").append(number);
++                if (!season.isEmpty()) m.append("Řada ").append(season);
++                if (!number.isEmpty()) m.append(m.length() > 0 ? " · " : "").append("Díl ").append(number);
+                 if (m.length() == 0 && !episode.isEmpty() && !episode.equals(title)) m.append(episode);
+                 String t = title;
+ 
+diff --git a/app/src/main/java/com/techpp/glass/Weather.java b/app/src/main/java/com/techpp/glass/Weather.java
+index fd8b153..bff3bc8 100644
+--- a/app/src/main/java/com/techpp/glass/Weather.java
++++ b/app/src/main/java/com/techpp/glass/Weather.java
+@@ -33,6 +33,8 @@ import java.util.concurrent.Executors;
+  */
+ final class Weather {
+     private static final String TAG = "GlassWeather";
++    /** The language of the saved line; a line saved in another one is fetched again. */
++    private static final String LANG = "cs";
+     private static final long REFRESH_MS = 30 * 60_000L, RETRY_MS = 10 * 60_000L, MAX_AGE_S = 2 * 3600;
+ 
+     interface Listener { void onWeather(String line); }
+@@ -51,6 +53,7 @@ final class Weather {
+     /** The last line shown, or null when no location is set (the greeting stays). */
+     String cached() {
+         if (area() == null || !unit().equals(prefs.getString("unit", "C"))) return null;  // °C/°F changed: refetch
++        if (!LANG.equals(prefs.getString("lang", ""))) return null;  // saved in another language: refetch
+         return prefs.getString("line", null);
+     }
+ 
+@@ -63,7 +66,8 @@ final class Weather {
+         // Running set-location.sh again (even with the same place) rewrites the file: fetch right away.
+         long stamp = new File(ctx.getExternalFilesDir(null), "location.txt").lastModified();
+         boolean moved = !area.equals(prefs.getString("area", null)) || stamp != prefs.getLong("file_at", 0)
+-                || !unit().equals(prefs.getString("unit", "C"));  // the TV now in a °F country, or back
++                || !unit().equals(prefs.getString("unit", "C"))  // the TV now in a °F country, or back
++                || !LANG.equals(prefs.getString("lang", ""));
+         prefs.edit().putLong("file_at", stamp).apply();
+         if (!moved && (now - prefs.getLong("ok_at", 0) < REFRESH_MS || now - prefs.getLong("try_at", 0) < RETRY_MS)) return;
+         prefs.edit().putLong("try_at", now).apply();
+@@ -72,7 +76,7 @@ final class Weather {
+             try {
+                 double[] where = locate(area);
+                 String line = observe(where[0], where[1]);
+-                prefs.edit().putString("line", line).putString("unit", unit()).putLong("ok_at", System.currentTimeMillis()).apply();
++                prefs.edit().putString("line", line).putString("unit", unit()).putString("lang", LANG).putLong("ok_at", System.currentTimeMillis()).apply();
+                 Log.i(TAG, "Weather: " + line);
+                 main.post(() -> l.onWeather(line));
+             } catch (Exception e) {
+@@ -113,7 +117,7 @@ final class Weather {
+             tries.add(area);
+             for (String p : parts) if (!p.trim().isEmpty()) tries.add(p.trim());
+             for (String q : tries) {
+-                JSONArray r = get("https://geocoding-api.open-meteo.com/v1/search?count=1&language=en&format=json&name="
++                JSONArray r = get("https://geocoding-api.open-meteo.com/v1/search?count=1&language=cs&format=json&name="
+                         + URLEncoder.encode(q, "UTF-8")).optJSONArray("results");
+                 if (r != null && r.length() > 0) {
+                     JSONObject o = r.getJSONObject(0);
+@@ -186,7 +190,7 @@ final class Weather {
+         return null;
+     }
+ 
+-    /** "27° Showers"; in Fahrenheit where that's the custom (the US and a few others, Region). Both sources give °C. */
++    /** "27° Přeháňky"; in Fahrenheit where that's the custom (the US and a few others, Region). Both sources give °C. */
+     private String line(double temp, String condition, String where) {
+         if (Region.fahrenheit(Region.country(ctx))) temp = temp * 9 / 5 + 32;
+         String s = Math.round(temp) + "° " + condition;
+@@ -223,16 +227,17 @@ final class Weather {
+ 
+     /** WMO weather codes, as Open-Meteo uses them. */
+     private static String wmoCondition(int code, boolean day) {
+-        if (code == 0) return day ? "Sunny" : "Clear";
+-        if (code == 1) return day ? "Mostly sunny" : "Mostly clear";
+-        if (code == 2) return "Partly cloudy";
+-        if (code == 3) return "Overcast";
+-        if (code == 45 || code == 48) return "Fog";
+-        if (code >= 51 && code <= 57) return "Drizzle";
+-        if (code >= 61 && code <= 67) return "Rain";
+-        if (code >= 71 && code <= 77) return "Snow";
+-        if (code >= 80 && code <= 82) return "Showers";
+-        if (code >= 95) return "Thunderstorm";
++        if (code == 0) return day ? "Slunečno" : "Jasno";
++        if (code == 1) return day ? "Převážně slunečno" : "Převážně jasno";
++        if (code == 2) return "Polojasno";
++        if (code == 3) return "Zataženo";
++        if (code == 45 || code == 48) return "Mlha";
++        if (code >= 51 && code <= 57) return "Mrholení";
++        if (code >= 61 && code <= 67) return "Déšť";
++        if (code >= 71 && code <= 77) return "Sněžení";
++        if (code >= 80 && code <= 82) return "Přeháňky";
++        if (code >= 85 && code <= 86) return "Sněhové přeháňky";
++        if (code >= 95) return "Bouřka";
+         return "—";
+     }
+ 
+diff --git a/app/src/main/res/layout/activity_home.xml b/app/src/main/res/layout/activity_home.xml
+index 14b47ba..3ad5e70 100644
+--- a/app/src/main/res/layout/activity_home.xml
++++ b/app/src/main/res/layout/activity_home.xml
+@@ -34,7 +34,7 @@
+                 android:fontVariationSettings="'wght' 600"
+                 android:includeFontPadding="false"
+                 android:letterSpacing="-0.015"
+-                android:text="For You"
++                android:text="Pro vás"
+                 android:textSize="38sp"
+                 android:visibility="gone" />
+ 
+@@ -44,9 +44,9 @@
+                 android:layout_height="wrap_content"
+                 android:layout_marginStart="-12dp"
+                 android:orientation="horizontal">
+-                <TextView android:id="@+id/tab_recent" style="@style/TabText" android:text="Continue" />
+-                <TextView android:id="@+id/tab_trending" style="@style/TabText" android:layout_marginStart="2dp" android:text="Trending" />
+-                <TextView android:id="@+id/tab_india" style="@style/TabText" android:layout_marginStart="2dp" android:text="New in India" />
++                <TextView android:id="@+id/tab_recent" style="@style/TabText" android:text="Pokračovat" />
++                <TextView android:id="@+id/tab_trending" style="@style/TabText" android:layout_marginStart="2dp" android:text="Populární" />
++                <TextView android:id="@+id/tab_local" style="@style/TabText" android:layout_marginStart="2dp" android:text="Novinky" />
+             </LinearLayout>
+         </LinearLayout>
+ 
+@@ -64,12 +64,12 @@
+                 android:layout_width="wrap_content"
+                 android:layout_height="wrap_content"
+                 android:orientation="horizontal">
+-                <ImageView android:id="@+id/icon_cc" style="@style/IconButton" android:src="@drawable/ic_cc" android:contentDescription="Control Center" />
+-                <ImageView android:id="@+id/icon_inputs" style="@style/IconButton" android:src="@drawable/ic_input" android:contentDescription="Inputs" />
++                <ImageView android:id="@+id/icon_cc" style="@style/IconButton" android:src="@drawable/ic_cc" android:contentDescription="Ovládací centrum" />
++                <ImageView android:id="@+id/icon_inputs" style="@style/IconButton" android:src="@drawable/ic_input" android:contentDescription="Vstupy" />
+                 <ImageView android:id="@+id/icon_wifi" style="@style/IconButton" android:src="@drawable/ic_wifi" android:contentDescription="Wi-Fi" />
+-                <ImageView android:id="@+id/icon_settings" style="@style/IconButton" android:src="@drawable/ic_settings" android:contentDescription="Settings" />
++                <ImageView android:id="@+id/icon_settings" style="@style/IconButton" android:src="@drawable/ic_settings" android:contentDescription="Nastavení" />
+                 <!-- Shown only while the Play Store has updates waiting -->
+-                <ImageView android:id="@+id/icon_bell" style="@style/IconButton" android:src="@drawable/ic_bell" android:contentDescription="App updates" android:visibility="gone" />
++                <ImageView android:id="@+id/icon_bell" style="@style/IconButton" android:src="@drawable/ic_bell" android:contentDescription="Aktualizace aplikací" android:visibility="gone" />
+             </LinearLayout>
+ 
+             <TextView
+@@ -83,20 +83,6 @@
+                 android:textSize="13sp" />
+         </LinearLayout>
+ 
+-        <!-- Cricket: the most relevant live (or today's) match, under the time and weather -->
+-        <TextView
+-            android:id="@+id/score"
+-            android:layout_width="wrap_content"
+-            android:layout_height="wrap_content"
+-            android:layout_gravity="end|top"
+-            android:layout_marginTop="72dp"
+-            android:layout_marginEnd="40dp"
+-            android:fontFamily="@font/outfit"
+-            android:fontVariationSettings="'wght' 500"
+-            android:singleLine="true"
+-            android:textSize="13sp"
+-            android:visibility="gone" />
+-
+         <TextView
+             android:id="@+id/credit"
+             android:layout_width="wrap_content"
+@@ -105,7 +91,7 @@
+             android:layout_marginTop="106dp"
+             android:layout_marginEnd="40dp"
+             android:fontFamily="@font/outfit"
+-            android:text="Picks from TMDB"
++            android:text="Tipy z TMDB"
+             android:textSize="11sp" />
+ 
+         <!-- Weather, then time | date, top left. -->
+@@ -220,7 +206,7 @@
+             android:layout_marginTop="566dp"
+             android:fontFamily="@font/outfit"
+             android:fontVariationSettings="'wght' 600"
+-            android:text="All apps"
++            android:text="Všechny aplikace"
+             android:textSize="20sp" />
+ 
+         <LinearLayout
+diff --git a/app/src/main/res/values/dock.xml b/app/src/main/res/values/dock.xml
+index f89783c..cc20ac0 100644
+--- a/app/src/main/res/values/dock.xml
++++ b/app/src/main/res/values/dock.xml
+@@ -3,12 +3,12 @@
+     <!-- The starting dock, left to right (7 apps). Rearrange on the TV by holding OK on an app;
+          apps that aren't installed are skipped and the dock fills up from the rest. -->
+     <string-array name="dock_packages">
+-        <item>in.startv.hotstar</item>
+-        <item>com.google.android.youtube.tv</item>
+         <item>com.netflix.ninja</item>
+-        <item>com.amazon.amazonvideo.livingroom</item>
+-        <item>com.graymatrix.did</item>
+-        <item>tv.airtel.xstream.tvapp</item>
+-        <item>com.apple.atve.androidtv.appletv</item>
++        <item>com.stremio.one</item>
++        <item>org.smarttube.beta</item>
++        <item>net.cme.voyo.cz.tvapp</item>
++        <item>cz.ceskatelevize.ivysilani.tvapp</item>
++        <item>org.droidtv.playtv</item>
++        <item>com.android.vending</item>
+     </string-array>
+ </resources>
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index bc2752f..05c60c8 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -1,6 +1,6 @@
+ <resources>
+     <string name="app_name">Talkies</string>
+-    <string name="sleep_service_label">Talkies</string>
+-    <string name="sleep_service_description">Keeps Talkies as your home screen (the Home button opens it, and it opens over the Google TV home screen, except right after the Assistant shows results there), puts the TV in standby for Turn off now and the sleep timer, and types a cricket match into JioHotstar\'s search when you pick its card. It filters only the Home button and sees only JioHotstar\'s, Google TV\'s and the Assistant\'s windows.</string>
+-    <string name="watch_service_label">Talkies: recently watched</string>
++    <string name="sleep_service_label">Talkies – ovládání TV</string>
++    <string name="sleep_service_description">Udržuje Talkies jako domovskou obrazovku (tlačítko Domů ji otevře a zobrazí se i přes vestavěnou domovskou obrazovku TV, kromě chvíle těsně po výsledcích Asistenta), uspí TV pro „Vypnout TV“ a časovač vypnutí a provádí funkce, které přiřadíte tlačítkům ovladače. Filtruje jen tlačítko Domů a tlačítka, kterým jste přiřadili funkci, a vidí jen okna vestavěné domovské obrazovky TV a Asistenta.</string>
++    <string name="watch_service_label">Talkies: naposledy sledované</string>
+ </resources>
+diff --git a/app/src/main/res/xml/sleep_service.xml b/app/src/main/res/xml/sleep_service.xml
+index a09d31f..e39fda2 100644
+--- a/app/src/main/res/xml/sleep_service.xml
++++ b/app/src/main/res/xml/sleep_service.xml
+@@ -1,8 +1,7 @@
+ <?xml version="1.0" encoding="utf-8"?>
+-<!-- Standby for Turn off; typing a match into JioHotstar's search; keeping Talkies as the home screen while the
+-     TV's own launcher stays enabled; the sleep warning; remote keys. It sees windows only of JioHotstar, the TV's
+-     built-in launchers and Google's Assistant: the packages below are a starting point, replaced at start with the
+-     launchers this TV actually has (SleepService.findStockHomes). -->
++<!-- Standby for Turn off; keeping Talkies as the home screen while the TV's own launcher stays enabled; the sleep
++     warning; remote keys. It sees windows only of the TV's built-in launchers and Google's Assistant: the packages
++     below are a starting point, replaced at start with the launchers this TV actually has (SleepService.findStockHomes). -->
+ <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+     android:description="@string/sleep_service_description"
+     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+@@ -10,5 +9,5 @@
+     android:accessibilityFlags="flagRequestFilterKeyEvents"
+     android:canRequestFilterKeyEvents="true"
+     android:canRetrieveWindowContent="true"
+-    android:packageNames="in.startv.hotstar,com.google.android.apps.tv.launcherx,com.google.android.katniss"
++    android:packageNames="com.google.android.tvlauncher,com.google.android.apps.tv.launcherx,com.google.android.katniss"
+     android:notificationTimeout="100" />
+diff --git a/build-and-install.sh b/build-and-install.sh
+index d2023a0..01d3c7f 100755
+--- a/build-and-install.sh
++++ b/build-and-install.sh
+@@ -31,10 +31,6 @@ adb -s "$DEV" shell -n pm grant $PKG android.permission.ACCESS_FINE_LOCATION ||
+ adb -s "$DEV" shell -n pm grant $PKG android.permission.READ_TV_LISTINGS || true
+ 
+ # Trending picks: put back the TMDB key saved by set-tmdb-key.sh (e.g. after a fresh install).
+-if [ -f "$HERE/cricket_key.txt" ]; then
+-  adb -s "$DEV" shell -n mkdir -p /sdcard/Android/data/$PKG/files
+-  adb -s "$DEV" push "$HERE/cricket_key.txt" /sdcard/Android/data/$PKG/files/cricket_key.txt >/dev/null
+-fi
+ if [ -f "$HERE/tmdb_key.txt" ]; then
+   adb -s "$DEV" shell -n mkdir -p /sdcard/Android/data/$PKG/files
+   adb -s "$DEV" push "$HERE/tmdb_key.txt" /sdcard/Android/data/$PKG/files/tmdb_key.txt >/dev/null
+diff --git a/set-cricket-key.sh b/set-cricket-key.sh
+deleted file mode 100755
+index ed96ed2..0000000
+--- a/set-cricket-key.sh
++++ /dev/null
+@@ -1,31 +0,0 @@
+-#!/bin/bash
+-# Saves your CricketData.org key on the TV for the cricket scores (header line and Cricket row). The key is read without being shown,
+-# kept in cricket_key.txt next to this script (only you can read it), and never built into the app.
+-#   ./set-tmdb-key.sh            ask for the key
+-#   ./set-tmdb-key.sh --remove   delete the key (and the row) from the TV
+-# Optional last argument: the TV's address (default: TALKIES_TV or the .tv file, see tv-address.sh).
+-set -euo pipefail
+-HERE="$(cd "$(dirname "$0")" && pwd)"
+-. "$(dirname "$0")/tv-address.sh"
+-DEV="$(tv_default)"; REMOVE=0
+-for a in "$@"; do [ "$a" = "--remove" ] && REMOVE=1 || DEV="$a"; done
+-need_tv
+-F=/sdcard/Android/data/com.techpp.glass/files
+-adb connect "$DEV" >/dev/null 2>&1 || true
+-
+-if [ "$REMOVE" = 1 ]; then
+-  adb -s "$DEV" shell -n rm -rf "$F/cricket_key.txt" "$F/cricket"
+-  rm -f "$HERE/cricket_key.txt"
+-  echo "Key removed. The scores disappear the next time you press Home."
+-else
+-  read -rsp "Paste your CricketData.org API key, then press Return: " KEY; echo
+-  KEY="$(printf '%s' "$KEY" | tr -d '[:space:]')"
+-  [ -n "$KEY" ] || { echo "No key entered."; exit 1; }
+-  ( umask 077; printf '%s' "$KEY" > "$HERE/cricket_key.txt" )
+-  adb -s "$DEV" shell -n mkdir -p "$F"
+-  adb -s "$DEV" push "$HERE/cricket_key.txt" "$F/cricket_key.txt" >/dev/null
+-  echo "Key saved on the TV. Press Home on the remote; the first scores take a few seconds."
+-fi
+-# No force-stop: Talkies rereads the key on its next refresh, and force-stopping it would switch off its
+-# accessibility service (Android treats that as a crash), which keeps the Home button on Talkies.
+-adb -s "$DEV" shell -n input keyevent KEYCODE_HOME
+diff --git a/set-region.sh b/set-region.sh
+index a29b4fd..0191d53 100755
+--- a/set-region.sh
++++ b/set-region.sh
+@@ -1,5 +1,5 @@
+ #!/bin/bash
+-# Sets the country Talkies uses for picks, cricket and °C/°F, when the TV's own settings say otherwise.
++# Sets the country Talkies uses for picks and °C/°F, when the TV's own settings say otherwise.
+ # Normally it follows the TV's time zone (then its language setting), so most people never need this.
+ #   ./set-region.sh GB          a two-letter country code
+ #   ./set-region.sh --remove    back to the TV's own settings
