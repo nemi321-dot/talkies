@@ -613,7 +613,7 @@ index 1733623..0000000
 -    }
 -}
 diff --git a/app/src/main/java/com/techpp/glass/HomeActivity.java b/app/src/main/java/com/techpp/glass/HomeActivity.java
-index a7425a2..56974cf 100644
+index a7425a2..ad7fca3 100644
 --- a/app/src/main/java/com/techpp/glass/HomeActivity.java
 +++ b/app/src/main/java/com/techpp/glass/HomeActivity.java
 @@ -60,7 +60,6 @@ import java.util.Calendar;
@@ -668,7 +668,7 @@ index a7425a2..56974cf 100644
      private TextView[] tabs;
      private ImageView[] icons;
      private PicksRow picksRow;
-@@ -122,19 +127,24 @@ public class HomeActivity extends Activity {
+@@ -122,19 +127,30 @@ public class HomeActivity extends Activity {
      private List<Channels.Channel> editList, beforeEdit;
      private boolean menuMoving, channelsEdited;
  
@@ -689,18 +689,24 @@ index a7425a2..56974cf 100644
      private int tabIdx = TAB_TRENDING;
      private long pickHour = -1;
      private final ExecutorService background = Executors.newSingleThreadExecutor();
-+    /** Pictures are decoded on their own thread; the recently used ones stay in a cache of about 6 MB. */
++    /** Pictures are decoded on their own thread; the recently used ones stay in a cache of about 10 MB
++     *  (the current row's and the first cards of the tabs either side, see preloadNeighbours). */
 +    private final ExecutorService images = Executors.newSingleThreadExecutor();
-+    private final android.util.LruCache<String, Bitmap> bitmaps = new android.util.LruCache<String, Bitmap>(6 * 1024 * 1024) {
++    private final android.util.LruCache<String, Bitmap> bitmaps = new android.util.LruCache<String, Bitmap>(10 * 1024 * 1024) {
 +        @Override protected int sizeOf(String key, Bitmap b) { return b.getByteCount(); }
 +    };
 +    /** The pick cards around the focused one that hold their picture. */
 +    private static final int WINDOW_BEFORE = 2, WINDOW_AFTER = PicksRow.AHEAD;
 +    private Typeface outfitFont;
++    /** Preloading the tabs either side: bumped when the row changes, so a stale preload stops. */
++    private volatile int preloadGen;
++    private final Runnable preload = this::preloadNeighbours;
++    private static final int PRELOAD_CARDS = 6;
++    private static final long PRELOAD_IDLE_MS = 400;
  
      // Focus.
      private int zone = Z_DOCK, iconIdx = P_INPUTS, dockIdx = 0, gridIdx = 0;
-@@ -234,12 +244,13 @@ public class HomeActivity extends Activity {
+@@ -234,12 +250,13 @@ public class HomeActivity extends Activity {
          channelsBox = findViewById(R.id.channels);
          title = findViewById(R.id.title);
          info = findViewById(R.id.info);
@@ -716,7 +722,7 @@ index a7425a2..56974cf 100644
          icons = new ImageView[]{findViewById(R.id.icon_cc), findViewById(R.id.icon_inputs), findViewById(R.id.icon_wifi),
                  findViewById(R.id.icon_settings), findViewById(R.id.icon_bell)};
          Updates.setListener(this::onUpdates);
-@@ -250,8 +261,6 @@ public class HomeActivity extends Activity {
+@@ -250,8 +267,6 @@ public class HomeActivity extends Activity {
          AppEntry.setBannerSize(px(GRID_TILE_W * 1.10f), px(GRID_TILE_H * 1.10f));
          trending = new Trending(this);
          weather = new Weather(this);
@@ -725,7 +731,7 @@ index a7425a2..56974cf 100644
          weatherLine = weather.cached();
          day = isDayNow();
          theme = Theme.of(day);
-@@ -310,7 +319,6 @@ public class HomeActivity extends Activity {
+@@ -310,7 +325,6 @@ public class HomeActivity extends Activity {
          bigWeather.setTextColor(theme.text2);
          bigRule.setBackgroundColor((theme.text2 & 0x00FFFFFF) | 0x66000000);
          allAppsLabel.setTextColor(theme.text);
@@ -733,7 +739,7 @@ index a7425a2..56974cf 100644
          GradientDrawable band = new GradientDrawable();
          band.setCornerRadius(px(30));
          band.setColor(theme.band);
-@@ -319,10 +327,10 @@ public class HomeActivity extends Activity {
+@@ -319,10 +333,10 @@ public class HomeActivity extends Activity {
          moveHint.setTextColor(theme.text);
          moveHint.setBackground(rounded(theme.menuBg, theme.menuStroke, 14));
          ring.setDay(day);
@@ -747,7 +753,7 @@ index a7425a2..56974cf 100644
              chanSignature = "";
              showChannels(appChannels);
          }
-@@ -359,7 +367,6 @@ public class HomeActivity extends Activity {
+@@ -359,7 +373,6 @@ public class HomeActivity extends Activity {
              tabs[i].setFontVariationSettings(selected ? "'wght' 600" : "'wght' 400");
              tabs[i].setBackground(f ? rounded(theme.iconFocusBg, 0, 15) : null);
          }
@@ -755,7 +761,7 @@ index a7425a2..56974cf 100644
      }
  
      /**
-@@ -392,7 +399,7 @@ public class HomeActivity extends Activity {
+@@ -392,7 +405,7 @@ public class HomeActivity extends Activity {
          SpannableStringBuilder b = new SpannableStringBuilder(time);
          b.setSpan(new ForegroundColorSpan(theme.text), 0, time.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
          b.setSpan(new StyleSpan(Typeface.BOLD), 0, time.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
@@ -764,7 +770,7 @@ index a7425a2..56974cf 100644
          if (weatherLine != null) b.append("  ·  ").append(weatherLine);
          info.setTextColor(theme.text2);
          info.setText(b);
-@@ -400,41 +407,9 @@ public class HomeActivity extends Activity {
+@@ -400,41 +413,9 @@ public class HomeActivity extends Activity {
          bigTime.setText(DateFormat.format(h24 ? "HH:mm" : "h:mm", now));
          bigAmPm.setText(h24 ? "" : DateFormat.format("a", now));
          bigAmPm.setVisibility(h24 ? View.GONE : View.VISIBLE);
@@ -807,7 +813,7 @@ index a7425a2..56974cf 100644
      }
  
      private void onMinute() {
-@@ -443,11 +418,11 @@ public class HomeActivity extends Activity {
+@@ -443,11 +424,11 @@ public class HomeActivity extends Activity {
          boolean nowDay = isDayNow();
          if (nowDay != day) { day = nowDay; applyTheme(); }
          // New picks on the hour, but never while you're looking through them.
@@ -821,7 +827,7 @@ index a7425a2..56974cf 100644
  
      private boolean isDayNow() {
          int mode = prefs.getInt("appearance", 0);
-@@ -607,28 +582,9 @@ public class HomeActivity extends Activity {
+@@ -607,28 +588,9 @@ public class HomeActivity extends Activity {
          });
      }
  
@@ -852,7 +858,7 @@ index a7425a2..56974cf 100644
          {
              {
                  StringBuilder sig = new StringBuilder();
-@@ -670,15 +626,7 @@ public class HomeActivity extends Activity {
+@@ -670,15 +632,7 @@ public class HomeActivity extends Activity {
              header.setOrientation(LinearLayout.HORIZONTAL);
              header.setGravity(android.view.Gravity.CENTER_VERTICAL);
              header.setPadding(px(40), 0, px(40), 0);
@@ -869,7 +875,7 @@ index a7425a2..56974cf 100644
                  ImageView icon = new ImageView(this);
                  try {
                      // App icons can be 512 px; keep a 20 dp copy.
-@@ -759,12 +707,11 @@ public class HomeActivity extends Activity {
+@@ -759,12 +713,11 @@ public class HomeActivity extends Activity {
          layoutPage();
      }
  
@@ -884,7 +890,7 @@ index a7425a2..56974cf 100644
          FrameLayout card = new FrameLayout(this);
          card.setBackground(rounded(theme.tileBg, 0, 10));
          final float r = px(10);
-@@ -777,10 +724,9 @@ public class HomeActivity extends Activity {
+@@ -777,10 +730,9 @@ public class HomeActivity extends Activity {
          card.addView(img, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
          if (p.image != null && p.image.isFile()) {
              final File f = p.image;
@@ -898,7 +904,7 @@ index a7425a2..56974cf 100644
                  if (b != null) runOnUiThread(() -> img.setImageBitmap(b));
              });
          } else if (p.pkg != null) {
-@@ -801,73 +747,6 @@ public class HomeActivity extends Activity {
+@@ -801,73 +753,6 @@ public class HomeActivity extends Activity {
          return card;
      }
  
@@ -972,15 +978,16 @@ index a7425a2..56974cf 100644
      private void styleChannels() {
          for (int i = 0; i < channelsBox.getChildCount(); i++) {
              View row = channelsBox.getChildAt(i);
-@@ -882,11 +761,29 @@ public class HomeActivity extends Activity {
+@@ -882,11 +767,29 @@ public class HomeActivity extends Activity {
  
      private void loadPicks() {
          recentPicks = continuePicks(RecentStore.load(this), watchNextPicks);
 -        trendPicks = trending.cached(Trending.TRENDING);
 -        indiaPicks = trending.cached(Trending.INDIA);
 +        loadCatalogPicks();
-+    }
-+
+     }
+ 
+-    private List<Trending.Pick> picksFor(int t) { return t == 0 ? recentPicks : t == 1 ? trendPicks : indiaPicks; }
 +    /** The saved catalog picks, one list per tab (Continue's stays empty; empty when Stremio isn't installed). */
 +    private void loadCatalogPicks() {
 +        List<Trending.Pick> all = trending.cached();
@@ -990,9 +997,8 @@ index a7425a2..56974cf 100644
 +            if (t != TAB_CONTINUE) for (Trending.Pick p : all) if (TAB_IDS[t].equals(p.tab)) list.add(p);
 +            catalogPicks.add(list);
 +        }
-     }
- 
--    private List<Trending.Pick> picksFor(int t) { return t == 0 ? recentPicks : t == 1 ? trendPicks : indiaPicks; }
++    }
++
 +    private boolean noCatalogPicks() {
 +        for (List<Trending.Pick> l : catalogPicks) if (!l.isEmpty()) return false;
 +        return true;
@@ -1005,7 +1011,7 @@ index a7425a2..56974cf 100644
  
      /**
       * Continue: what apps put on Android's Watch Next list (Netflix, Prime Video…, opening the right episode) plus what
-@@ -900,7 +797,7 @@ public class HomeActivity extends Activity {
+@@ -900,7 +803,7 @@ public class HomeActivity extends Activity {
          for (Trending.Pick p : watchNext) if (!hidden.contains(continueKey(p))) wnShown.add(p);
          watchNext = wnShown;
          // An app's Watch Next entries (they open the right episode) win over what we saw it play, unless it played
@@ -1014,7 +1020,7 @@ index a7425a2..56974cf 100644
          Map<String, Long> newest = new java.util.HashMap<>();
          for (Trending.Pick p : watchNext) newest.merge(p.pkg, p.at, Math::max);
          List<Trending.Pick> all = new ArrayList<>(watchNext);
-@@ -924,7 +821,7 @@ public class HomeActivity extends Activity {
+@@ -924,7 +827,7 @@ public class HomeActivity extends Activity {
      }
  
      /**
@@ -1023,7 +1029,7 @@ index a7425a2..56974cf 100644
       * 4 an hour come round every 6 hours (when the list is refreshed anyway). The row shows 12 of them, which keeps
       * the posters in memory the same as before.
       */
-@@ -932,33 +829,39 @@ public class HomeActivity extends Activity {
+@@ -932,33 +835,40 @@ public class HomeActivity extends Activity {
          if (all.isEmpty()) return all;
          int start = (int) ((Trending.localHour() * Trending.SHOWN) % all.size());
          List<Trending.Pick> out = new ArrayList<>();
@@ -1063,6 +1069,7 @@ index a7425a2..56974cf 100644
 -        List<View> views = new ArrayList<>();
 -        for (Trending.Pick p : rowPicks) views.add(pickView(p));
 -        picksRow.setItems(views, anchor);
++        preloadGen++;
 +        // The row releases the old row's views and pictures (switching back finds them in the cache), then creates
 +        // views only for the cards near the current one; more come as focus moves (see PicksRow).
 +        final List<Trending.Pick> shown = rowPicks;
@@ -1073,7 +1080,7 @@ index a7425a2..56974cf 100644
          updatePickImages(picksRow.anchor());
          picksRow.setVisibility(rowPicks.isEmpty() ? View.INVISIBLE : View.VISIBLE);
          styleTop();
-@@ -1011,7 +914,7 @@ public class HomeActivity extends Activity {
+@@ -1011,7 +921,7 @@ public class HomeActivity extends Activity {
          name.setSingleLine(true);
          name.setEllipsize(android.text.TextUtils.TruncateAt.END);
          name.setTextSize(16);
@@ -1082,7 +1089,7 @@ index a7425a2..56974cf 100644
          name.setFontVariationSettings("'wght' 600");
          LinearLayout.LayoutParams nl = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
          nl.topMargin = px(9);
-@@ -1023,7 +926,7 @@ public class HomeActivity extends Activity {
+@@ -1023,7 +933,7 @@ public class HomeActivity extends Activity {
          meta.setSingleLine(true);
          meta.setEllipsize(android.text.TextUtils.TruncateAt.END);
          meta.setTextSize(12.5f);
@@ -1091,7 +1098,7 @@ index a7425a2..56974cf 100644
          meta.setFontVariationSettings("'wght' 400");
          meta.setAlpha(0f);
          LinearLayout.LayoutParams ml = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-@@ -1035,37 +938,64 @@ public class HomeActivity extends Activity {
+@@ -1035,37 +945,64 @@ public class HomeActivity extends Activity {
      }
  
      /**
@@ -1172,7 +1179,7 @@ index a7425a2..56974cf 100644
       * size in the middle, instead of the small banner stretched across the card.
       */
      private void showAppLogo(View card, ImageView v, String pkg) {
-@@ -1094,27 +1024,51 @@ public class HomeActivity extends Activity {
+@@ -1094,27 +1031,54 @@ public class HomeActivity extends Activity {
                  Math.round(Color.blue(a) + (Color.blue(b) - Color.blue(a)) * t));
      }
  
@@ -1184,7 +1191,7 @@ index a7425a2..56974cf 100644
 +     * the pictures thread (never on the UI thread). A decode the card no longer wants by then is skipped.
 +     */
 +    private void loadInto(ImageView v, File file, int w, int h) {
-+        String want = file.getPath() + "@" + w + "x" + h;
++        String want = bitmapKey(file, w, h);
          if (want.equals(v.getTag(R.id.img_state))) return;
          v.setTag(R.id.img_state, want);
 -        background.execute(() -> {
@@ -1204,6 +1211,9 @@ index a7425a2..56974cf 100644
          });
      }
  
++    /** The cache key of a picture decoded for a w × h px card. */
++    private static String bitmapKey(File file, int w, int h) { return file.getPath() + "@" + w + "x" + h; }
++
 +    private Typeface outfit() {
 +        if (outfitFont == null) outfitFont = getResources().getFont(R.font.outfit);
 +        return outfitFont;
@@ -1233,7 +1243,7 @@ index a7425a2..56974cf 100644
          o.inPreferredConfig = Bitmap.Config.RGB_565;
          return BitmapFactory.decodeFile(f.getPath(), o);
      }
-@@ -1152,7 +1106,7 @@ public class HomeActivity extends Activity {
+@@ -1152,7 +1116,7 @@ public class HomeActivity extends Activity {
                  List<Trending.Pick> merged = continuePicks(RecentStore.load(this), watchNextPicks);
                  if (!sameKeys(recentPicks, merged)) {
                      recentPicks = merged;
@@ -1242,7 +1252,7 @@ index a7425a2..56974cf 100644
                      else styleTop();
                  }
              });
-@@ -1166,14 +1120,13 @@ public class HomeActivity extends Activity {
+@@ -1166,14 +1130,13 @@ public class HomeActivity extends Activity {
      }
  
      private void onPicks(List<Trending.Pick> all) {
@@ -1260,12 +1270,83 @@ index a7425a2..56974cf 100644
              tabIdx = TAB_TRENDING;
              buildPicksRow(0);
          } else styleTop();
-@@ -1490,6 +1443,14 @@ public class HomeActivity extends Activity {
+@@ -1279,6 +1242,7 @@ public class HomeActivity extends Activity {
+         }
+         setFocus(null, 1f, 0);
+         styleTop();
++        schedulePreload();
+     }
+ 
+     private void focusPicks(int i) {
+@@ -1292,6 +1256,49 @@ public class HomeActivity extends Activity {
+         setFocus(picksRow.anchorCard(), 1.02f, 14);
+         styleTop();
+         followRing(moved ? 360 : 220);
++        schedulePreload();
++    }
++
++    /** Preloads the tabs either side once the remote has been still for a moment (every move puts it off). */
++    private void schedulePreload() {
++        picksRow.removeCallbacks(preload);
++        picksRow.postDelayed(preload, PRELOAD_IDLE_MS);
++    }
++
++    /**
++     * Decodes, on the pictures thread, the first cards' pictures of the tabs left and right of this one into the
++     * cache, at the sizes those cards use (the large card's backdrop, the small cards' posters), so switching tabs
++     * finds them ready. Skipped when the row changes meanwhile; never blocks the UI thread.
++     */
++    private void preloadNeighbours() {
++        if (zone != Z_PICKS && zone != Z_TABS || !forYou) return;
++        int largeW = px(PicksRow.LARGE_W), smallW = px(PicksRow.SMALL_W), cardH = px(PicksRow.CARD_H);
++        List<File> files = new ArrayList<>();
++        List<int[]> sizes = new ArrayList<>();
++        for (int t : new int[]{nextTab(tabIdx, -1), nextTab(tabIdx, 1)}) {
++            if (t < 0 || t == TAB_CONTINUE) continue;
++            List<Trending.Pick> shown = rotated(picksFor(t));  // what buildPicksRow would show, card 0 large
++            for (int i = 0; i < shown.size() && i < PRELOAD_CARDS; i++) {
++                Trending.Pick p = shown.get(i);
++                File f = i == 0 || p.poster == null ? p.image : p.poster;
++                if (f == null) continue;
++                files.add(f);
++                sizes.add(new int[]{i == 0 ? largeW : smallW, cardH});
++            }
++        }
++        if (files.isEmpty()) return;
++        final int gen = preloadGen;
++        images.execute(() -> {
++            for (int i = 0; i < files.size(); i++) {
++                if (gen != preloadGen) return;  // another tab or row since
++                File f = files.get(i);
++                int w = sizes.get(i)[0], h = sizes.get(i)[1];
++                String key = bitmapKey(f, w, h);
++                if (bitmaps.get(key) != null) continue;
++                Bitmap b = decode(f, w, h);
++                if (b != null) bitmaps.put(key, b);
++            }
++        });
+     }
+ 
+     private void focusDock(int i) {
+@@ -1490,6 +1497,27 @@ public class HomeActivity extends Activity {
  
      /** Opens a pick or channel card: through the app's own link to that title when it gave one, else the app. */
      private void openPick(Trending.Pick p) {
 +        if (Trending.NETFLIX.equals(p.pkg) && p.intentUri == null) {
-+            // The kids' tabs: Netflix itself (it takes no link by IMDb id); nothing when it isn't installed.
++            // The kids' tabs: the title's page in Netflix when its id is known (only this form of link opens the page
++            // on the TV; a plain https link opens Netflix's home), else Netflix itself; nothing when it isn't installed.
++            if (p.netflixId != null && !p.netflixId.isEmpty()) {
++                String id = p.netflixId;
++                String uri = "http://www.netflix.com/title/" + id + "#Intent;launchFlags=0x20;component=com.netflix.ninja/.MainActivity;"
++                        + "i.source_type=27;S.deeplink=m%3D" + id + "%26source_type%3D27%26source_type_payload%3D"
++                        + "groupIndex%253D1%2526tileIndex%253D0%2526action%253Dmdp;end";
++                try {
++                    startActivity(Intent.parseUri(uri, Intent.URI_INTENT_SCHEME).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
++                    return;
++                } catch (Exception ex) {
++                    Log.w(TAG, "Netflix link failed, opening Netflix: " + ex.getClass().getSimpleName());
++                }
++            }
 +            Intent app = pm.getLeanbackLaunchIntentForPackage(Trending.NETFLIX);
 +            if (app == null) app = pm.getLaunchIntentForPackage(Trending.NETFLIX);
 +            if (app != null) start(app);
@@ -1275,7 +1356,7 @@ index a7425a2..56974cf 100644
          if (p.intentUri != null) {
              try {
                  startActivity(Intent.parseUri(p.intentUri, Intent.URI_INTENT_SCHEME).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-@@ -1498,17 +1459,25 @@ public class HomeActivity extends Activity {
+@@ -1498,17 +1526,25 @@ public class HomeActivity extends Activity {
                  Log.w(TAG, "Link failed, opening the app: " + ex.getClass().getSimpleName());
              }
          }
@@ -1310,7 +1391,7 @@ index a7425a2..56974cf 100644
      }
  
      private void back() {
-@@ -1542,7 +1511,7 @@ public class HomeActivity extends Activity {
+@@ -1542,7 +1578,7 @@ public class HomeActivity extends Activity {
          beforeMove = new ArrayList<>(apps);
          ring.setMoving(true);
          refocusMoving();
@@ -1319,7 +1400,7 @@ index a7425a2..56974cf 100644
          moveHint.setAlpha(0f);
          moveHint.setVisibility(View.VISIBLE);
          moveHint.animate().alpha(1f).setDuration(150).start();
-@@ -1752,7 +1721,7 @@ public class HomeActivity extends Activity {
+@@ -1752,7 +1788,7 @@ public class HomeActivity extends Activity {
          n = 1;
          for (TvInputInfo i : av) addInput(av.size() == 1 ? "AV" : fixLabel(label(i), "AV " + n++), tim, i, passthrough(i));
          final TvInputInfo tunerInfo = tuner;
@@ -1328,7 +1409,7 @@ index a7425a2..56974cf 100644
              if (tunerInfo != null) {
                  Intent v = new Intent(Intent.ACTION_VIEW);
                  v.setDataAndType(TvContract.buildChannelsUriForInput(tunerInfo.getId()), "vnd.android.cursor.dir/channel");
-@@ -1801,29 +1770,29 @@ public class HomeActivity extends Activity {
+@@ -1801,29 +1837,29 @@ public class HomeActivity extends Activity {
          if (name.isEmpty() || name.contains("HW") || name.contains("/")) return null;
          int state;
          try { state = tim.getInputState(device.getId()); } catch (Exception e) { return name; }
@@ -1365,7 +1446,7 @@ index a7425a2..56974cf 100644
          menuClosed = () -> { SleepService.learn(null); focusTop(P_CONTROL); };
          showMenu(360);
          SleepService.learn(code -> {
-@@ -1834,17 +1803,17 @@ public class HomeActivity extends Activity {
+@@ -1834,17 +1870,17 @@ public class HomeActivity extends Activity {
      /** What the button does: an app, Inputs, Talkies, nothing, or its normal job. */
      private void openKeyActions(int code) {
          menuClosed = null;
@@ -1389,7 +1470,7 @@ index a7425a2..56974cf 100644
          for (AppEntry a : apps) addRow(a.label, null, () -> setKey(code, RemoteKeys.APP + a.pkg), false);
          showMenu(360);
      }
-@@ -1866,7 +1835,7 @@ public class HomeActivity extends Activity {
+@@ -1866,7 +1902,7 @@ public class HomeActivity extends Activity {
          background.execute(() -> {
              String st;
              if (Settings.Global.getInt(getContentResolver(), Settings.Global.ADB_ENABLED, 0) == 0) {
@@ -1398,7 +1479,7 @@ index a7425a2..56974cf 100644
              } else {
                  boolean listening;
                  try (java.net.Socket sock = new java.net.Socket()) {
-@@ -1875,7 +1844,7 @@ public class HomeActivity extends Activity {
+@@ -1875,7 +1911,7 @@ public class HomeActivity extends Activity {
                  } catch (Exception e) {
                      listening = false;
                  }
@@ -1407,7 +1488,7 @@ index a7425a2..56974cf 100644
              }
              final String r = st;
              runOnUiThread(() -> done.accept(r));
-@@ -1883,20 +1852,20 @@ public class HomeActivity extends Activity {
+@@ -1883,20 +1919,20 @@ public class HomeActivity extends Activity {
      }
  
      private void openNetworkDebugging() {
@@ -1432,7 +1513,7 @@ index a7425a2..56974cf 100644
          showMenu(460);
      }
  
-@@ -1920,11 +1889,11 @@ public class HomeActivity extends Activity {
+@@ -1920,11 +1956,11 @@ public class HomeActivity extends Activity {
          beginMenu(P_CONTROL, a.label);
          menuTile = tile;
          menuClosed = () -> { if (z == Z_DOCK) focusDock(di); else focusGrid(gi); };
@@ -1447,7 +1528,7 @@ index a7425a2..56974cf 100644
                  Uri.parse("package:" + a.pkg))), false);
          showMenu(240);
      }
-@@ -1942,7 +1911,7 @@ public class HomeActivity extends Activity {
+@@ -1942,7 +1978,7 @@ public class HomeActivity extends Activity {
  
      /** The focused Continue card (Continue tab or the Watch Next row), or null. */
      private Trending.Pick continueCard() {
@@ -1456,7 +1537,7 @@ index a7425a2..56974cf 100644
          if (zone == Z_CHAN && chanIdx < chanRows.size() && Channels.WATCH_NEXT.equals(chanRows.get(chanIdx).key)) {
              List<Trending.Pick> items = chanRows.get(chanIdx).items;
              if (!items.isEmpty()) return items.get(Math.min(chanCol[chanIdx], items.size() - 1));
-@@ -1959,9 +1928,9 @@ public class HomeActivity extends Activity {
+@@ -1959,9 +1995,9 @@ public class HomeActivity extends Activity {
          beginMenu(P_CONTROL, p.title);
          menuTile = z == Z_PICKS ? picksRow.anchorCard() : chanCards.get(r).get(c);
          menuClosed = () -> { if (z == Z_PICKS) focusPicks(anchor); else focusChan(r, c); };
@@ -1468,7 +1549,7 @@ index a7425a2..56974cf 100644
          showMenu(320);
      }
  
-@@ -1978,11 +1947,11 @@ public class HomeActivity extends Activity {
+@@ -1978,11 +2014,11 @@ public class HomeActivity extends Activity {
          }
          Log.i(TAG, "Removed from Continue: " + p.title);
          recentPicks = continuePicks(RecentStore.load(this), watchNextPicks);
@@ -1482,7 +1563,7 @@ index a7425a2..56974cf 100644
              buildPicksRow(0);
          }
          refocusChannels = zone == Z_CHAN;
-@@ -1991,45 +1960,19 @@ public class HomeActivity extends Activity {
+@@ -1991,45 +2027,19 @@ public class HomeActivity extends Activity {
  
      // ---------------------------------------------------------------- network
  
@@ -1530,7 +1611,7 @@ index a7425a2..56974cf 100644
      // ---------------------------------------------------------------- app updates
  
      /** The bell shows while the Play Store has updates waiting (Updates, fed by WatchService). */
-@@ -2044,7 +1987,7 @@ public class HomeActivity extends Activity {
+@@ -2044,7 +2054,7 @@ public class HomeActivity extends Activity {
      private void openUpdates() {
          List<Updates.Item> list = Updates.list();
          if (list.isEmpty()) return;
@@ -1539,7 +1620,7 @@ index a7425a2..56974cf 100644
          for (Updates.Item it : list) {
              String label = it.title.isEmpty() ? it.text : it.title;
              addRow(label, it.title.isEmpty() ? null : shorten(it.text, 34), () -> {
-@@ -2066,28 +2009,26 @@ public class HomeActivity extends Activity {
+@@ -2066,28 +2076,26 @@ public class HomeActivity extends Activity {
  
      // Ported from tv-vibehack's launcher (pr/control-center, MIT); see THIRD_PARTY_NOTICES.md.
      private void openControlCenter() {
@@ -1576,7 +1657,7 @@ index a7425a2..56974cf 100644
              int mode = (prefs.getInt("appearance", 0) + 1) % APPEARANCE.length;
              prefs.edit().putInt("appearance", mode).apply();
              setStatus(look[0], APPEARANCE[mode]);
-@@ -2100,55 +2041,54 @@ public class HomeActivity extends Activity {
+@@ -2100,55 +2108,54 @@ public class HomeActivity extends Activity {
              focusMenu(menuIdx);
          }, true);
          final View[] fy = new View[1];
@@ -1650,7 +1731,7 @@ index a7425a2..56974cf 100644
          TextView nt = notice.findViewById(R.id.input_label);
          nt.setSingleLine(false);
          nt.setMaxLines(3);
-@@ -2170,7 +2110,7 @@ public class HomeActivity extends Activity {
+@@ -2170,7 +2177,7 @@ public class HomeActivity extends Activity {
      }
  
      private void fillChannelsMenu() {
@@ -1659,7 +1740,7 @@ index a7425a2..56974cf 100644
          menuMode = MENU_CHANNELS;
          for (Channels.Channel ch : editList) {
              final Channels.Channel c = ch;
-@@ -2188,9 +2128,9 @@ public class HomeActivity extends Activity {
+@@ -2188,9 +2195,9 @@ public class HomeActivity extends Activity {
          boolean first = true;
          for (int i = 0; i < editList.size() && i < menuItems.size(); i++) {
              Channels.Channel ch = editList.get(i);
@@ -1671,7 +1752,7 @@ index a7425a2..56974cf 100644
              setStatus(menuItems.get(i), status);
          }
      }
-@@ -2201,7 +2141,7 @@ public class HomeActivity extends Activity {
+@@ -2201,7 +2208,7 @@ public class HomeActivity extends Activity {
          menuMoving = true;
          beforeEdit = new ArrayList<>(editList);
          channelStatuses();
@@ -1680,7 +1761,7 @@ index a7425a2..56974cf 100644
          moveHint.setAlpha(0f);
          moveHint.setVisibility(View.VISIBLE);
          moveHint.animate().alpha(1f).setDuration(150).start();
-@@ -2251,13 +2191,13 @@ public class HomeActivity extends Activity {
+@@ -2251,13 +2258,13 @@ public class HomeActivity extends Activity {
  
      private String sleepStatus() {
          int left = Sleep.minutesLeft(this);
@@ -1697,7 +1778,7 @@ index a7425a2..56974cf 100644
          closeMenu();
          Intent i = new Intent().setClassName("com.android.tv.settings", "com.android.tv.settings.oemlink.AccessibilitySettingsActivity");
          if (pm.resolveActivity(i, 0) == null) i = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
-@@ -2286,7 +2226,7 @@ public class HomeActivity extends Activity {
+@@ -2286,7 +2293,7 @@ public class HomeActivity extends Activity {
      private void freeMemory(View row) {
          ActivityManager am = getSystemService(ActivityManager.class);
          long before = availableMb();
@@ -1706,7 +1787,7 @@ index a7425a2..56974cf 100644
          for (ApplicationInfo ai : pm.getInstalledApplications(0)) {
              if ((ai.flags & ApplicationInfo.FLAG_SYSTEM) != 0) continue;
              if (ai.packageName.equals(getPackageName())) continue;
-@@ -2294,7 +2234,7 @@ public class HomeActivity extends Activity {
+@@ -2294,7 +2301,7 @@ public class HomeActivity extends Activity {
          }
          row.postDelayed(() -> {
              long after = availableMb();
@@ -1715,7 +1796,7 @@ index a7425a2..56974cf 100644
          }, 800);
      }
  
-@@ -2304,7 +2244,7 @@ public class HomeActivity extends Activity {
+@@ -2304,7 +2311,7 @@ public class HomeActivity extends Activity {
          boolean online = caps != null && (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
                  || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET));
          icons[P_WIFI].setAlpha(online ? 1f : 0.45f);
@@ -1724,7 +1805,7 @@ index a7425a2..56974cf 100644
      }
  
      /** Your own wallpaper (files/wallpaper.jpg|png|webp) replaces the soft backdrop. */
-@@ -2326,15 +2266,19 @@ public class HomeActivity extends Activity {
+@@ -2326,15 +2333,19 @@ public class HomeActivity extends Activity {
              updateAmbient();
              return;
          }
@@ -1753,7 +1834,7 @@ index a7425a2..56974cf 100644
      }
  
      // ---------------------------------------------------------------- lifecycle
-@@ -2372,23 +2316,16 @@ public class HomeActivity extends Activity {
+@@ -2372,23 +2383,16 @@ public class HomeActivity extends Activity {
          weatherLine = weather.cached();
          updateInfo();
          refreshOnline();
@@ -1783,7 +1864,7 @@ index a7425a2..56974cf 100644
          refreshWatchNext();
          getContentResolver().registerContentObserver(TvContract.WatchNextPrograms.CONTENT_URI, true, watchNextChanged);
      }
-@@ -2415,7 +2352,6 @@ public class HomeActivity extends Activity {
+@@ -2415,7 +2419,6 @@ public class HomeActivity extends Activity {
      @Override
      protected void onResume() {
          super.onResume();
@@ -1791,7 +1872,7 @@ index a7425a2..56974cf 100644
          inFront = true;
          root.post(this::snapRing);
          refreshOnline();   // back on the home screen: catch up on anything that went stale meanwhile
-@@ -2429,7 +2365,7 @@ public class HomeActivity extends Activity {
+@@ -2429,7 +2432,7 @@ public class HomeActivity extends Activity {
      }
  
      /**
@@ -1800,7 +1881,7 @@ index a7425a2..56974cf 100644
       * display is on: never behind another app, under the screensaver, or in standby. Each also has its own interval.
       */
      private void refreshOnline() {
-@@ -2438,13 +2374,12 @@ public class HomeActivity extends Activity {
+@@ -2438,13 +2441,12 @@ public class HomeActivity extends Activity {
              Log.i(TAG, "Refresh skipped: " + (!inFront ? "another app in front" : !hasWindowFocus() ? "screensaver or dialog on top" : "display off"));
              return;
          }
@@ -1815,7 +1896,7 @@ index a7425a2..56974cf 100644
              refreshChannels();
          });
      }
-@@ -2459,7 +2394,7 @@ public class HomeActivity extends Activity {
+@@ -2459,7 +2461,7 @@ public class HomeActivity extends Activity {
      @Override
      protected void onNewIntent(Intent intent) {
          super.onNewIntent(intent);
@@ -2298,10 +2379,10 @@ index d1eca59..0000000
 -    }
 -}
 diff --git a/app/src/main/java/com/techpp/glass/Trending.java b/app/src/main/java/com/techpp/glass/Trending.java
-index f90fdbc..3a14920 100644
+index f90fdbc..4982768 100644
 --- a/app/src/main/java/com/techpp/glass/Trending.java
 +++ b/app/src/main/java/com/techpp/glass/Trending.java
-@@ -21,76 +21,103 @@ import java.net.HttpURLConnection;
+@@ -21,76 +21,104 @@ import java.net.HttpURLConnection;
  import java.net.URL;
  import java.nio.charset.StandardCharsets;
  import java.util.ArrayList;
@@ -2406,7 +2487,7 @@ index f90fdbc..3a14920 100644
 -        {"paramount", "com.cbs.ott", "Paramount+"},
 -        {"crunchyroll", "com.crunchyroll.crunchyroid", "Crunchyroll"},
 -        {"mubi", "com.mubi", "MUBI"},
-+    private static final int CACHE_VERSION = 12;
++    private static final int CACHE_VERSION = 13;
 +
 +    /** English genre names in Czech: Cinemeta's (titles without TMDB data) and those TMDB leaves untranslated. */
 +    private static final String[][] GENRES = {
@@ -2444,6 +2525,7 @@ index f90fdbc..3a14920 100644
          long at;            // Recently watched: when it was last watched
          String intentUri;   // Recently watched (Watch Next): opens the right title or episode
 -        String meta = "";   // the line under a big card, e.g. "Film · Action · Telugu · Netflix"
++        String netflixId = "";  // kids' picks: the Netflix title id ("80026226"), "" when not looked up yet
 +        String meta = "";   // the line under a big card, e.g. "Film · Akční · Drama · 2024"
          float progress = -1; // Continue: how far in (0–1), or -1 when unknown
 -        Object extra;        // Cricket: the Cricket.Match this card shows
@@ -2451,7 +2533,7 @@ index f90fdbc..3a14920 100644
  
          String key() { return "pick:" + tab + ":" + kind + ":" + id; }
      }
-@@ -101,11 +128,9 @@ final class Trending {
+@@ -101,11 +129,9 @@ final class Trending {
      private final File dir;
      private final SharedPreferences prefs;
      private final ExecutorService worker = Executors.newSingleThreadExecutor();
@@ -2465,7 +2547,24 @@ index f90fdbc..3a14920 100644
      private final Handler main = new Handler(Looper.getMainLooper());
      private boolean running;
  
-@@ -127,33 +152,48 @@ final class Trending {
+@@ -118,6 +144,16 @@ final class Trending {
+ 
+     private File keyFile() { return new File(dir.getParentFile(), "tmdb_key.txt"); }
+ 
++    /** The Streaming Availability (RapidAPI) key, files/rapidapi_key.txt; null turns Netflix id lookups off. */
++    private String rapidKey() {
++        try (InputStream in = new FileInputStream(new File(dir.getParentFile(), "rapidapi_key.txt"))) {
++            String k = new String(readAll(in), StandardCharsets.UTF_8).trim();
++            return k.isEmpty() ? null : k;
++        } catch (IOException e) {
++            return null;
++        }
++    }
++
+     String key() {
+         try (InputStream in = new FileInputStream(keyFile())) {
+             String k = new String(readAll(in), StandardCharsets.UTF_8).trim();
+@@ -127,33 +163,49 @@ final class Trending {
          }
      }
  
@@ -2519,11 +2618,12 @@ index f90fdbc..3a14920 100644
                  p.meta = o.optString("meta", "");
 -                if (p.image.isFile() && installed(p.pkg)) out.add(p);
 +                p.description = o.optString("description", "");
++                p.netflixId = o.optString("netflix", "");
 +                if (p.image.isFile() && !p.imdb.isEmpty()) out.add(p);
              }
          } catch (Exception e) {
              // Nothing saved yet.
-@@ -161,7 +201,7 @@ final class Trending {
+@@ -161,7 +213,7 @@ final class Trending {
          return out;
      }
  
@@ -2532,7 +2632,7 @@ index f90fdbc..3a14920 100644
      static long localHour() {
          long now = System.currentTimeMillis();
          return (now + java.util.TimeZone.getDefault().getOffset(now)) / 3600_000L;
-@@ -179,17 +219,14 @@ final class Trending {
+@@ -179,17 +231,14 @@ final class Trending {
  
      /** Fetches a new list in the background when the saved one is old. Calls back on the main thread. */
      void refreshIfStale(Listener l) {
@@ -2556,7 +2656,7 @@ index f90fdbc..3a14920 100644
          }
          if (now - prefs.getLong("ok_at", 0) < REFRESH_MS || now - prefs.getLong("try_at", 0) < RETRY_MS) return;
          prefs.edit().putLong("try_at", now).apply();
-@@ -213,244 +250,410 @@ final class Trending {
+@@ -213,244 +262,558 @@ final class Trending {
      private void fetch(String key) throws Exception {
          if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("Cannot create " + dir);
          long started = System.currentTimeMillis();
@@ -2693,7 +2793,8 @@ index f90fdbc..3a14920 100644
 +            if (items == null) continue;
 +            List<Pick> list = new ArrayList<>();
 +            for (JSONObject r : items) {
-+                if (list.size() >= PER_CATALOG) break;
++                // Kids: a few spare titles, for those Netflix CZ turns out not to have (see netflixIds).
++                if (list.size() >= (kids(l[0]) ? PER_CATALOG + 10 : PER_CATALOG)) break;
 +                Pick p = fromTmdb(r, l[1], l[2], details.get(detailsPath(l[2], r.optInt("id", 0))));
 +                if (p == null) continue;
 +                list.add(p);
@@ -2753,6 +2854,8 @@ index f90fdbc..3a14920 100644
 -
 -        List<Pick> picks = new ArrayList<>(trend);
 -        picks.addAll(india);
++        // 5. Kids: each title's Netflix id, so OK opens it in Netflix; titles Netflix CZ doesn't have are dropped.
++        netflixIds(byList);
 +        byTab.putAll(byList);  // each TMDB list is its own tab
 +
 +        List<Pick> picks = new ArrayList<>();
@@ -2766,6 +2869,192 @@ index f90fdbc..3a14920 100644
  
 -    private java.util.concurrent.Future<JSONObject> later(String key, String path) {
 -        return net.submit(() -> get(key, path));
+-    }
++    // ---------------------------------------------------------------- Netflix ids (kids' tabs)
+ 
+-    /** Starts the "where does it stream?" lookups for the next few titles in a queue, so they're ready when needed. */
+-    private void lookAhead(String key, List<JSONObject> queue, int from, Set<String> exclude) throws Exception {
+-        for (int i = from, n = 0; i < queue.size() && n < LOOKAHEAD; i++) {
+-            JSONObject o = queue.get(i);
+-            String id = o.getString("_kind") + o.getInt("id");
+-            if (exclude.contains(id)) continue;
+-            n++;
+-            if (!providerLookups.containsKey(id)) {
+-                providerLookups.put(id, later(key, "/" + o.getString("_kind") + "/" + o.getInt("id") + "/watch/providers"));
++    private static final String RAPID_HOST = "streaming-availability.p.rapidapi.com";
++    /** Free plan: 100 requests a day. */
++    private static final int LOOKUPS_PER_REFRESH = 45, LOOKUPS_PER_DAY = 90, LOOKUPS_AT_ONCE = 2;
++    private static final long NONE_RETRY_MS = 7 * 24 * 3600_000L;
++
++    /**
++     * Fills the kids' picks' Netflix ids from files/netflix_ids.json, looking up (within the daily budget) those not
++     * known yet or not found more than a week ago; then drops the titles known not to be on Netflix CZ and keeps up to
++     * PER_CATALOG. Without a RapidAPI key only the saved ids are used.
++     */
++    private void netflixIds(Map<String, List<Pick>> byList) throws InterruptedException {
++        File file = new File(dir.getParentFile(), "netflix_ids.json");
++        JSONObject cache = new JSONObject();
++        try (InputStream in = new FileInputStream(file)) {
++            cache = new JSONObject(new String(readAll(in), StandardCharsets.UTF_8));
++        } catch (Exception e) {
++            // None saved yet.
++        }
++        try {
++            JSONObject ids = cache.optJSONObject("ids");
++            if (ids == null) {
++                ids = new JSONObject();
++                cache.put("ids", ids);
++            }
++            String today = java.time.LocalDate.now().toString();
++            if (!today.equals(cache.optString("day", ""))) cache.put("day", today).put("count", 0);
++            int used = cache.optInt("count", 0);
++            long now = System.currentTimeMillis();
++
++            // Which titles to look up, in list order (the most popular first).
++            String rapid = rapidKey();
++            List<String> todo = new ArrayList<>();
++            int budget = Math.max(0, Math.min(LOOKUPS_PER_REFRESH, LOOKUPS_PER_DAY - used));
++            for (String list : new String[]{KIDS_SERIES, KIDS_MOVIES}) {
++                List<Pick> picks = byList.get(list);
++                if (picks == null || rapid == null) continue;
++                for (Pick p : picks) {
++                    String k = netflixKey(p);
++                    JSONObject e = ids.optJSONObject(k);
++                    boolean known = e != null && (e.has("id") || now - e.optLong("none", 0) < NONE_RETRY_MS);
++                    if (!known && !todo.contains(k) && todo.size() < budget) todo.add(k);
++                }
++            }
++            if (!todo.isEmpty()) {
++                java.util.concurrent.Semaphore atOnce = new java.util.concurrent.Semaphore(LOOKUPS_AT_ONCE);
++                Map<String, Future<String>> jobs = new HashMap<>();
++                for (String k : todo) {
++                    jobs.put(k, net.submit(() -> {
++                        atOnce.acquire();
++                        try {
++                            return netflixLookup(rapid, k);
++                        } finally {
++                            atOnce.release();
++                        }
++                    }));
++                }
++                cache.put("count", used + todo.size());
++                int found = 0;
++                for (String k : todo) {
++                    try {
++                        String id = jobs.get(k).get();
++                        if (id.isEmpty()) ids.put(k, new JSONObject().put("none", now));
++                        else { ids.put(k, new JSONObject().put("id", id)); found++; }
++                    } catch (ExecutionException e) {
++                        // Rate limit, server error or no connection: not saved, tried again next time.
++                        Log.w(TAG, "Netflix id for " + k + ": " + e.getCause());
++                    }
++                }
++                Log.i(TAG, "Netflix ids: " + todo.size() + " looked up, " + found + " found, " + (used + todo.size()) + " today");
++                File tmp = new File(file.getPath() + ".tmp");
++                try (OutputStream out = new FileOutputStream(tmp)) { out.write(cache.toString().getBytes(StandardCharsets.UTF_8)); }
++                if (!tmp.renameTo(file)) Log.w(TAG, "Cannot save " + file.getName());
++            }
++
++            // Ids onto the picks; titles not on Netflix CZ out.
++            for (String list : new String[]{KIDS_SERIES, KIDS_MOVIES}) {
++                List<Pick> picks = byList.get(list);
++                if (picks == null) continue;
++                List<Pick> kept = new ArrayList<>();
++                for (Pick p : picks) {
++                    JSONObject e = ids.optJSONObject(netflixKey(p));
++                    if (e != null && e.has("id")) p.netflixId = e.optString("id", "");
++                    else if (e != null && e.has("none")) continue;
++                    if (kept.size() < PER_CATALOG) kept.add(p);
++                }
++                byList.put(list, kept);
++                Log.i(TAG, list + ": " + kept.size() + " titles on Netflix (or not looked up yet)");
++            }
++        } catch (org.json.JSONException | IOException e) {
++            Log.w(TAG, "Netflix ids: " + e.getMessage());
++            for (String list : new String[]{KIDS_SERIES, KIDS_MOVIES}) {
++                List<Pick> picks = byList.get(list);
++                if (picks != null && picks.size() > PER_CATALOG) byList.put(list, new ArrayList<>(picks.subList(0, PER_CATALOG)));
+             }
+         }
+     }
+ 
+-    /** Backdrops and posters for the chosen picks, several at a time; a pick whose backdrop fails is dropped. */
+-    private List<Pick> downloadImages(List<Pick> picks) throws Exception {
+-        List<java.util.concurrent.Future<Boolean>> jobs = new ArrayList<>();
+-        for (Pick p : picks) {
+-            jobs.add(net.submit(() -> {
+-                if (!p.image.isFile()) download(BACKDROPS + p.backdropPath, p.image);
+-                if (p.poster != null && !p.poster.isFile()) {
+-                    try { download(POSTERS + p.posterPath, p.poster); } catch (IOException e) { p.poster = null; }
+-                }
+-                return true;
+-            }));
++    /** "tv:1234" or "movie:5678" (TMDB's kind and id). */
++    private static String netflixKey(Pick p) { return (p.kind.equals("series") ? "tv" : "movie") + ":" + p.tmdb; }
++
++    /**
++     * The Netflix title id for "tv:1234" from Streaming Availability's Czech catalogue, or "" when Netflix CZ doesn't
++     * have it. Throws on a rate limit, a server error or no connection (nothing to save then).
++     */
++    private static String netflixLookup(String rapid, String key) throws Exception {
++        String[] k = key.split(":");
++        HttpURLConnection c = (HttpURLConnection) new URL("https://" + RAPID_HOST + "/shows/" + k[0] + "/" + k[1]
++                + "?country=cz&series_granularity=show").openConnection();
++        c.setConnectTimeout(15_000);
++        c.setReadTimeout(30_000);
++        c.setRequestProperty("Accept", "application/json");
++        c.setRequestProperty("X-RapidAPI-Key", rapid);
++        c.setRequestProperty("X-RapidAPI-Host", RAPID_HOST);
++        String body;
++        try {
++            int code = c.getResponseCode();
++            if (code == 404) return "";
++            if (code != 200) throw new IOException("HTTP " + code);
++            try (InputStream in = c.getInputStream()) { body = new String(readAll(in), StandardCharsets.UTF_8); }
++        } catch (IOException e) {
++            c.disconnect();
++            throw e;
+         }
+-        List<Pick> out = new ArrayList<>();
+-        for (int i = 0; i < picks.size(); i++) {
+-            try {
+-                jobs.get(i).get();
+-                out.add(picks.get(i));
+-            } catch (java.util.concurrent.ExecutionException e) {
+-                Log.w(TAG, "No backdrop for " + picks.get(i).title + ": " + e.getCause());
+-            }
++        // Some replies carry raw control characters, which JSON doesn't allow.
++        StringBuilder clean = new StringBuilder(body.length());
++        for (int i = 0; i < body.length(); i++) {
++            char ch = body.charAt(i);
++            if (ch >= 0x20 || ch == '\t' || ch == '\n' || ch == '\r') clean.append(ch);
+         }
+-        return out;
++        JSONObject o = new JSONObject(clean.toString());
++        JSONObject options = o.optJSONObject("streamingOptions");
++        JSONArray cz = options == null ? null : options.optJSONArray("cz");
++        if (cz == null) return "";
++        for (int i = 0; i < cz.length(); i++) {
++            JSONObject opt = cz.optJSONObject(i);
++            JSONObject service = opt == null ? null : opt.optJSONObject("service");
++            if (service == null || !"netflix".equals(service.optString("id", ""))) continue;
++            java.util.regex.Matcher m = java.util.regex.Pattern.compile("/title/(\\d+)").matcher(opt.optString("link", ""));
++            return m.find() ? m.group(1) : "";
++        }
++        return "";
+     }
+ 
+-    /** Films and series alternating, without repeats or titles that have no backdrop. */
+-    private static List<JSONObject> merge(JSONArray movies, JSONArray shows) throws Exception {
+-        List<JSONObject> out = new ArrayList<>();
+-        Set<String> seen = new HashSet<>();
+-        for (int i = 0; i < Math.max(movies.length(), shows.length()); i++) {
+-            for (JSONArray a : new JSONArray[]{movies, shows}) {
+-                if (i >= a.length()) continue;
+-                JSONObject o = a.getJSONObject(i);
+-                if (o.optString("backdrop_path", "").isEmpty()) continue;
+-                if (seen.add(o.getString("_kind") + o.getInt("id"))) out.add(o);
+-            }
 +    private static boolean kids(String list) { return list.equals(KIDS_MOVIES) || list.equals(KIDS_SERIES); }
 +
 +    /** A TMDB list path (the key is added by get): kids' titles on Netflix CZ, new digital releases, Czech cinemas. */
@@ -2785,18 +3074,8 @@ index f90fdbc..3a14920 100644
 +        // LocalDate prints as yyyy-MM-dd.
 +        return "/discover/movie?language=" + LANG + "&sort_by=popularity.desc&with_release_type=4&release_date.gte="
 +                + today.minusDays(60) + "&release_date.lte=" + today + "&include_adult=false&page=" + page;
-     }
- 
--    /** Starts the "where does it stream?" lookups for the next few titles in a queue, so they're ready when needed. */
--    private void lookAhead(String key, List<JSONObject> queue, int from, Set<String> exclude) throws Exception {
--        for (int i = from, n = 0; i < queue.size() && n < LOOKAHEAD; i++) {
--            JSONObject o = queue.get(i);
--            String id = o.getString("_kind") + o.getInt("id");
--            if (exclude.contains(id)) continue;
--            n++;
--            if (!providerLookups.containsKey(id)) {
--                providerLookups.put(id, later(key, "/" + o.getString("_kind") + "/" + o.getInt("id") + "/watch/providers"));
--            }
++    }
++
 +    /** A TMDB list's titles that have a backdrop, each once; for kids, none from Japan, Korea or China (no Czech dub). */
 +    private static void addUsable(JSONObject page, List<JSONObject> out, Set<Integer> seen, String list) {
 +        boolean kids = kids(list);
@@ -2809,57 +3088,7 @@ index f90fdbc..3a14920 100644
 +            int id = r.optInt("id", 0);
 +            if (id > 0 && seen.add(id)) out.add(r);
          }
-     }
- 
--    /** Backdrops and posters for the chosen picks, several at a time; a pick whose backdrop fails is dropped. */
--    private List<Pick> downloadImages(List<Pick> picks) throws Exception {
--        List<java.util.concurrent.Future<Boolean>> jobs = new ArrayList<>();
--        for (Pick p : picks) {
--            jobs.add(net.submit(() -> {
--                if (!p.image.isFile()) download(BACKDROPS + p.backdropPath, p.image);
--                if (p.poster != null && !p.poster.isFile()) {
--                    try { download(POSTERS + p.posterPath, p.poster); } catch (IOException e) { p.poster = null; }
--                }
--                return true;
--            }));
--        }
--        List<Pick> out = new ArrayList<>();
--        for (int i = 0; i < picks.size(); i++) {
--            try {
--                jobs.get(i).get();
--                out.add(picks.get(i));
--            } catch (java.util.concurrent.ExecutionException e) {
--                Log.w(TAG, "No backdrop for " + picks.get(i).title + ": " + e.getCause());
--            }
-+    /** Kids: an original in Japanese, Korean or Chinese, or a series made in Japan, Korea, China or Taiwan. */
-+    private static boolean asian(JSONObject r) {
-+        String lang = str(r, "original_language");
-+        if (lang.equals("ja") || lang.equals("ko") || lang.equals("zh") || lang.equals("cn")) return true;
-+        JSONArray c = r.optJSONArray("origin_country");
-+        if (c != null) for (int i = 0; i < c.length(); i++) {
-+            String cc = c.optString(i, "");
-+            if (cc.equals("JP") || cc.equals("KR") || cc.equals("CN") || cc.equals("TW")) return true;
-         }
 -        return out;
-+        return false;
-     }
- 
--    /** Films and series alternating, without repeats or titles that have no backdrop. */
--    private static List<JSONObject> merge(JSONArray movies, JSONArray shows) throws Exception {
--        List<JSONObject> out = new ArrayList<>();
--        Set<String> seen = new HashSet<>();
--        for (int i = 0; i < Math.max(movies.length(), shows.length()); i++) {
--            for (JSONArray a : new JSONArray[]{movies, shows}) {
--                if (i >= a.length()) continue;
--                JSONObject o = a.getJSONObject(i);
--                if (o.optString("backdrop_path", "").isEmpty()) continue;
--                if (seen.add(o.getString("_kind") + o.getInt("id"))) out.add(o);
--            }
--        }
--        return out;
-+    /** TMDB details path, with the external ids (the IMDb id). */
-+    private static String detailsPath(String kind, int tmdb) {
-+        return (kind.equals("series") ? "/tv/" : "/movie/") + tmdb + "?language=" + LANG + "&append_to_response=external_ids";
      }
  
 -    /**
@@ -2895,6 +3124,30 @@ index f90fdbc..3a14920 100644
 -                exclude.add(got.kind + got.id);
 -                langs.merge(got.lang, 1, Integer::sum);
 -            } else if (!anyLeft) break;
++    /** Kids: an original in Japanese, Korean or Chinese, or a series made in Japan, Korea, China or Taiwan. */
++    private static boolean asian(JSONObject r) {
++        String lang = str(r, "original_language");
++        if (lang.equals("ja") || lang.equals("ko") || lang.equals("zh") || lang.equals("cn")) return true;
++        JSONArray c = r.optJSONArray("origin_country");
++        if (c != null) for (int i = 0; i < c.length(); i++) {
++            String cc = c.optString(i, "");
++            if (cc.equals("JP") || cc.equals("KR") || cc.equals("CN") || cc.equals("TW")) return true;
+         }
+-        Log.i(TAG, tab + ": " + picks.size() + " picks from " + checks + " checks, languages " + langs);
+-        return picks;
++        return false;
++    }
++
++    /** TMDB details path, with the external ids (the IMDb id). */
++    private static String detailsPath(String kind, int tmdb) {
++        return (kind.equals("series") ? "/tv/" : "/movie/") + tmdb + "?language=" + LANG + "&append_to_response=external_ids";
+     }
+ 
+-    /** The title as a pick if it streams (subscription) in India on an installed app; downloads its backdrop. */
+-    private Pick accept(String key, Map<Integer, String[]> services, String tab, JSONObject o) throws Exception {
+-        String kind = o.getString("_kind");
+-        java.util.concurrent.Future<JSONObject> lookup = providerLookups.get(kind + o.getInt("id"));
+-        JSONObject providers;
 +    private void submitDetails(Map<String, Future<JSONObject>> details, String key, String path) {
 +        if (!details.containsKey(path)) details.put(path, net.submit(() -> get(key, path)));
 +    }
@@ -2905,20 +3158,27 @@ index f90fdbc..3a14920 100644
 +            return !year.isEmpty() && Integer.parseInt(year) >= min;
 +        } catch (NumberFormatException e) {
 +            return false;
-         }
--        Log.i(TAG, tab + ": " + picks.size() + " picks from " + checks + " checks, languages " + langs);
--        return picks;
-     }
- 
--    /** The title as a pick if it streams (subscription) in India on an installed app; downloads its backdrop. */
--    private Pick accept(String key, Map<Integer, String[]> services, String tab, JSONObject o) throws Exception {
--        String kind = o.getString("_kind");
--        java.util.concurrent.Future<JSONObject> lookup = providerLookups.get(kind + o.getInt("id"));
--        JSONObject providers;
++        }
++    }
++
 +    /** A pick from a TMDB list title and its details; null without an IMDb id, a title or a backdrop. */
 +    private Pick fromTmdb(JSONObject r, String tab, String kind, Future<JSONObject> details) throws InterruptedException {
 +        if (details == null) return null;
 +        JSONObject o;
++        try {
++            o = details.get();
++        } catch (ExecutionException e) {
++            Log.w(TAG, "No TMDB details for " + r.optInt("id", 0) + ": " + e.getCause());
++            return null;
++        }
++        String imdb = str(o.optJSONObject("external_ids"), "imdb_id");
++        if (imdb.isEmpty()) imdb = str(o, "imdb_id");
++        if (!imdb.startsWith("tt")) return null;
++        Pick p = new Pick();
++        p.imdb = imdb;
++        p.kind = kind.equals("series") ? "series" : "movie";
++        p.tab = tab;
++        p.tmdb = r.optInt("id", 0);
          try {
 -            providers = lookup != null ? lookup.get() : get(key, "/" + kind + "/" + o.getInt("id") + "/watch/providers");
 -        } catch (java.util.concurrent.ExecutionException e) {
@@ -2930,19 +3190,44 @@ index f90fdbc..3a14920 100644
 -        String[] s = null;
 -        for (int i = 0; i < flat.length() && s == null; i++) s = services.get(flat.getJSONObject(i).getInt("provider_id"));
 -        if (s == null) return null;
-+            o = details.get();
-+        } catch (ExecutionException e) {
-+            Log.w(TAG, "No TMDB details for " + r.optInt("id", 0) + ": " + e.getCause());
-+            return null;
++            p.id = Integer.parseInt(imdb.substring(2));
++        } catch (NumberFormatException e) {
++            p.id = imdb.hashCode();
 +        }
-+        String imdb = str(o.optJSONObject("external_ids"), "imdb_id");
-+        if (imdb.isEmpty()) imdb = str(o, "imdb_id");
++        p.title = str(r, p.kind.equals("series") ? "name" : "title");
++        boolean netflix = kids(tab);
++        p.pkg = netflix ? NETFLIX : STREMIO;
++        p.service = netflix ? "Netflix" : "Stremio";
++        p.description = str(r, "overview");
++        applyTmdb(p, o);
++        if (p.image == null) {
++            // The details had no backdrop: the list's.
++            String backdrop = str(r, "backdrop_path");
++            if (backdrop.isEmpty()) return null;
++            p.imageUrl = BACKDROPS + backdrop;
++            p.image = new File(dir, p.kind + "_" + imdb + "_w780.jpg");
++        }
++        return p.title.isEmpty() ? null : p;
++    }
++
++    /** One Cinemeta catalog's titles. */
++    private static JSONArray catalog(String type, String id) throws Exception {
++        JSONObject o = getUrl(CINEMETA + type + "/" + id + ".json", null);
++        JSONArray a = o.optJSONArray("metas");
++        if (a == null) throw new IOException("No metas in " + type + "/" + id);
++        return a;
++    }
++
++    /** A pick from a Cinemeta title, with its English data and background picture; null without a picture. */
++    private Pick fromCinemeta(JSONObject m, String tab, String type) {
++        String imdb = str(m, "id");
 +        if (!imdb.startsWith("tt")) return null;
++        String background = str(m, "background");
          Pick p = new Pick();
 -        p.id = o.getInt("id");
 -        p.kind = kind;
 +        p.imdb = imdb;
-+        p.kind = kind.equals("series") ? "series" : "movie";
++        p.kind = type.equals("series") ? "series" : "movie";
          p.tab = tab;
 -        p.lang = o.optString("original_language", "");
 -        p.title = o.optString(kind.equals("tv") ? "name" : "title", "");
@@ -2964,45 +3249,6 @@ index f90fdbc..3a14920 100644
 -        if (!posterPath.isEmpty() && !posterPath.equals("null")) {
 -            p.poster = new File(dir, kind + "_" + p.id + "_poster.jpg");
 -            p.posterPath = posterPath;  // the backdrop alone is fine if this fails
-+        p.tmdb = r.optInt("id", 0);
-+        try {
-+            p.id = Integer.parseInt(imdb.substring(2));
-+        } catch (NumberFormatException e) {
-+            p.id = imdb.hashCode();
-+        }
-+        p.title = str(r, p.kind.equals("series") ? "name" : "title");
-+        boolean netflix = kids(tab);
-+        p.pkg = netflix ? NETFLIX : STREMIO;
-+        p.service = netflix ? "Netflix" : "Stremio";
-+        p.description = str(r, "overview");
-+        applyTmdb(p, o);
-+        if (p.image == null) {
-+            // The details had no backdrop: the list's.
-+            String backdrop = str(r, "backdrop_path");
-+            if (backdrop.isEmpty()) return null;
-+            p.imageUrl = BACKDROPS + backdrop;
-+            p.image = new File(dir, p.kind + "_" + imdb + "_w780.jpg");
-         }
-+        return p.title.isEmpty() ? null : p;
-+    }
-+
-+    /** One Cinemeta catalog's titles. */
-+    private static JSONArray catalog(String type, String id) throws Exception {
-+        JSONObject o = getUrl(CINEMETA + type + "/" + id + ".json", null);
-+        JSONArray a = o.optJSONArray("metas");
-+        if (a == null) throw new IOException("No metas in " + type + "/" + id);
-+        return a;
-+    }
-+
-+    /** A pick from a Cinemeta title, with its English data and background picture; null without a picture. */
-+    private Pick fromCinemeta(JSONObject m, String tab, String type) {
-+        String imdb = str(m, "id");
-+        if (!imdb.startsWith("tt")) return null;
-+        String background = str(m, "background");
-+        Pick p = new Pick();
-+        p.imdb = imdb;
-+        p.kind = type.equals("series") ? "series" : "movie";
-+        p.tab = tab;
 +        try {
 +            p.id = Integer.parseInt(imdb.substring(2));
 +        } catch (NumberFormatException e) {
@@ -3029,7 +3275,7 @@ index f90fdbc..3a14920 100644
 +        if (!background.isEmpty()) {
 +            p.imageUrl = background;
 +            p.image = new File(dir, p.kind + "_" + imdb + "_cm.jpg");
-+        }
+         }
 +        String poster = str(m, "poster");
 +        if (!poster.isEmpty()) {
 +            // The small size is plenty for the small cards and keeps their memory low.
@@ -3167,19 +3413,21 @@ index f90fdbc..3a14920 100644
      }
  
      private void save(List<Pick> picks) throws Exception {
-@@ -458,8 +661,9 @@ final class Trending {
+@@ -458,9 +821,10 @@ final class Trending {
          JSONArray a = new JSONArray();
          Set<String> keep = new HashSet<>();
          for (Pick p : picks) {
 -            a.put(new JSONObject().put("id", p.id).put("kind", p.kind).put("tab", p.tab).put("title", p.title)
 -                    .put("pkg", p.pkg).put("service", p.service).put("lang", p.lang).put("meta", p.meta).put("image", p.image.getName())
+-                    .put("poster", p.poster == null ? "" : p.poster.getName()));
 +            a.put(new JSONObject().put("id", p.id).put("kind", p.kind).put("imdb", p.imdb).put("tab", p.tab)
 +                    .put("title", p.title).put("pkg", p.pkg).put("service", p.service).put("meta", p.meta)
 +                    .put("description", p.description).put("image", p.image.getName())
-                     .put("poster", p.poster == null ? "" : p.poster.getName()));
++                    .put("poster", p.poster == null ? "" : p.poster.getName()).put("netflix", p.netflixId));
              keep.add(p.image.getName());
              if (p.poster != null) keep.add(p.poster.getName());
-@@ -479,25 +683,27 @@ final class Trending {
+         }
+@@ -479,25 +843,27 @@ final class Trending {
          }
      }
  
@@ -3217,7 +3465,7 @@ index f90fdbc..3a14920 100644
              try (InputStream in = c.getInputStream()) {
                  return new JSONObject(new String(readAll(in), StandardCharsets.UTF_8));
              }
-@@ -510,15 +716,22 @@ final class Trending {
+@@ -510,15 +876,22 @@ final class Trending {
      }
  
      private static void download(String url, File to) throws IOException {
