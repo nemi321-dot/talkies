@@ -613,7 +613,7 @@ index 1733623..0000000
 -    }
 -}
 diff --git a/app/src/main/java/com/techpp/glass/HomeActivity.java b/app/src/main/java/com/techpp/glass/HomeActivity.java
-index a7425a2..7c88439 100644
+index a7425a2..c200d0a 100644
 --- a/app/src/main/java/com/techpp/glass/HomeActivity.java
 +++ b/app/src/main/java/com/techpp/glass/HomeActivity.java
 @@ -60,7 +60,6 @@ import java.util.Calendar;
@@ -638,8 +638,8 @@ index a7425a2..7c88439 100644
      private static final int Z_TOP = 0, Z_TABS = 1, Z_PICKS = 2, Z_DOCK = 3, Z_GRID = 4, Z_MENU = 5, Z_CHAN = 6;
      private static final int P_CONTROL = 0, P_INPUTS = 1, P_WIFI = 2, P_SETTINGS = 3, P_BELL = 4;
 -    private static final String[] TAB_IDS = {RecentStore.TAB, Trending.TRENDING, Trending.INDIA};
-+    private static final String[] TAB_IDS = {RecentStore.TAB, Trending.MOVIES_TOP, Trending.MOVIES_NEW, Trending.SERIES_TOP,
-+            Trending.SERIES_NEW};
++    private static final String[] TAB_IDS = {RecentStore.TAB, Trending.MOVIES_NEW, Trending.MOVIES_TOP, Trending.SERIES_NEW,
++            Trending.SERIES_TOP};
      private static final int TAB_TRENDING = 1, MIN_CONTINUE = 10, MAX_CONTINUE = 16, MAX_YOUTUBE = 2;
      private static final int DOCK_SIZE = 7, GRID_COLS = 6;
      // Geometry (dp, on a 960 × 540 dp screen).
@@ -677,8 +677,8 @@ index a7425a2..7c88439 100644
          picksRow = findViewById(R.id.picks);
          ring = findViewById(R.id.ring);
 -        tabs = new TextView[]{findViewById(R.id.tab_recent), findViewById(R.id.tab_trending), findViewById(R.id.tab_india)};
-+        tabs = new TextView[]{findViewById(R.id.tab_recent), findViewById(R.id.tab_movies_top), findViewById(R.id.tab_movies_new),
-+                findViewById(R.id.tab_series_top), findViewById(R.id.tab_series_new)};
++        tabs = new TextView[]{findViewById(R.id.tab_recent), findViewById(R.id.tab_movies_new), findViewById(R.id.tab_movies_top),
++                findViewById(R.id.tab_series_new), findViewById(R.id.tab_series_top)};
          icons = new ImageView[]{findViewById(R.id.icon_cc), findViewById(R.id.icon_inputs), findViewById(R.id.icon_wifi),
                  findViewById(R.id.icon_settings), findViewById(R.id.icon_bell)};
          Updates.setListener(this::onUpdates);
@@ -2578,7 +2578,7 @@ index fd8b153..bff3bc8 100644
      }
  
 diff --git a/app/src/main/res/layout/activity_home.xml b/app/src/main/res/layout/activity_home.xml
-index 14b47ba..04a80fa 100644
+index 14b47ba..ad0b81e 100644
 --- a/app/src/main/res/layout/activity_home.xml
 +++ b/app/src/main/res/layout/activity_home.xml
 @@ -34,7 +34,7 @@
@@ -2598,10 +2598,10 @@ index 14b47ba..04a80fa 100644
 -                <TextView android:id="@+id/tab_trending" style="@style/TabText" android:layout_marginStart="2dp" android:text="Trending" />
 -                <TextView android:id="@+id/tab_india" style="@style/TabText" android:layout_marginStart="2dp" android:text="New in India" />
 +                <TextView android:id="@+id/tab_recent" style="@style/TabText" android:text="Pokračovat" />
-+                <TextView android:id="@+id/tab_movies_top" style="@style/TabText" android:layout_marginStart="2dp" android:text="Filmy populární" />
-+                <TextView android:id="@+id/tab_movies_new" style="@style/TabText" android:layout_marginStart="2dp" android:text="Filmy nové" />
-+                <TextView android:id="@+id/tab_series_top" style="@style/TabText" android:layout_marginStart="2dp" android:text="Seriály populární" />
-+                <TextView android:id="@+id/tab_series_new" style="@style/TabText" android:layout_marginStart="2dp" android:text="Seriály nové" />
++                <TextView android:id="@+id/tab_movies_new" style="@style/TabText" android:layout_marginStart="2dp" android:text="Nové filmy" />
++                <TextView android:id="@+id/tab_movies_top" style="@style/TabText" android:layout_marginStart="2dp" android:text="Populární filmy" />
++                <TextView android:id="@+id/tab_series_new" style="@style/TabText" android:layout_marginStart="2dp" android:text="Nové seriály" />
++                <TextView android:id="@+id/tab_series_top" style="@style/TabText" android:layout_marginStart="2dp" android:text="Populární seriály" />
              </LinearLayout>
          </LinearLayout>
  
