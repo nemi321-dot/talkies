@@ -2490,7 +2490,7 @@ index d1eca59..0000000
 -    }
 -}
 diff --git a/app/src/main/java/com/techpp/glass/Trending.java b/app/src/main/java/com/techpp/glass/Trending.java
-index f90fdbc..679f04d 100644
+index f90fdbc..650ebdc 100644
 --- a/app/src/main/java/com/techpp/glass/Trending.java
 +++ b/app/src/main/java/com/techpp/glass/Trending.java
 @@ -21,76 +21,104 @@ import java.net.HttpURLConnection;
@@ -2598,7 +2598,7 @@ index f90fdbc..679f04d 100644
 -        {"paramount", "com.cbs.ott", "Paramount+"},
 -        {"crunchyroll", "com.crunchyroll.crunchyroid", "Crunchyroll"},
 -        {"mubi", "com.mubi", "MUBI"},
-+    private static final int CACHE_VERSION = 16;
++    private static final int CACHE_VERSION = 18;
 +
 +    /** English genre names in Czech: Cinemeta's (titles without TMDB data) and those TMDB leaves untranslated. */
 +    private static final String[][] GENRES = {
@@ -2767,7 +2767,7 @@ index f90fdbc..679f04d 100644
          }
          if (now - prefs.getLong("ok_at", 0) < REFRESH_MS || now - prefs.getLong("try_at", 0) < RETRY_MS) return;
          prefs.edit().putLong("try_at", now).apply();
-@@ -213,244 +262,604 @@ final class Trending {
+@@ -213,244 +262,606 @@ final class Trending {
      private void fetch(String key) throws Exception {
          if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("Cannot create " + dir);
          long started = System.currentTimeMillis();
@@ -3134,8 +3134,10 @@ index f90fdbc..679f04d 100644
              }
          }
 -        return out;
++        // Nothing 12+: the US rating decides when there is one (TV-Y, TV-Y7, TV-Y7-FV, TV-G; not TV-PG or above),
++        // as German data is often contradictory (e.g. both 6 and 12); else the strictest German one (0 or 6).
++        if (us >= 0) return us <= 3;
 +        if (de >= 0) return de <= 6;
-+        if (us >= 0) return us <= 3;   // TV-Y, TV-Y7, TV-Y7-FV, TV-G
 +        return false;
      }
  
@@ -3567,7 +3569,7 @@ index f90fdbc..679f04d 100644
      }
  
      private void save(List<Pick> picks) throws Exception {
-@@ -458,9 +867,10 @@ final class Trending {
+@@ -458,9 +869,10 @@ final class Trending {
          JSONArray a = new JSONArray();
          Set<String> keep = new HashSet<>();
          for (Pick p : picks) {
@@ -3581,7 +3583,7 @@ index f90fdbc..679f04d 100644
              keep.add(p.image.getName());
              if (p.poster != null) keep.add(p.poster.getName());
          }
-@@ -479,25 +889,27 @@ final class Trending {
+@@ -479,25 +891,27 @@ final class Trending {
          }
      }
  
@@ -3619,7 +3621,7 @@ index f90fdbc..679f04d 100644
              try (InputStream in = c.getInputStream()) {
                  return new JSONObject(new String(readAll(in), StandardCharsets.UTF_8));
              }
-@@ -510,15 +922,22 @@ final class Trending {
+@@ -510,15 +924,22 @@ final class Trending {
      }
  
      private static void download(String url, File to) throws IOException {
