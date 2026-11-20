@@ -3836,6 +3836,44 @@ index 211d154..e04f322 100644
                  if (m.length() == 0 && !episode.isEmpty() && !episode.equals(title)) m.append(episode);
                  String t = title;
  
+diff --git a/app/src/main/java/com/techpp/glass/WatchService.java b/app/src/main/java/com/techpp/glass/WatchService.java
+index 4831ccc..3047fa4 100644
+--- a/app/src/main/java/com/techpp/glass/WatchService.java
++++ b/app/src/main/java/com/techpp/glass/WatchService.java
+@@ -48,8 +48,17 @@ public class WatchService extends NotificationListenerService {
+         @Override public void onSessionDestroyed() { stop(this); }
+ 
+         void update() {
++            try {
++                updateNow();
++            } catch (RuntimeException e) {  // a session can die or change mid-call; never take the launcher down with it
++                Log.w("GlassRecent", "skipping a media session update", e);
++            }
++        }
++
++        private void updateNow() {
+             String now = text(c.getMetadata(), MediaMetadata.METADATA_KEY_DISPLAY_TITLE, MediaMetadata.METADATA_KEY_TITLE);
+-            boolean playing = c.getPlaybackState() != null && c.getPlaybackState().getState() == PlaybackState.STATE_PLAYING;
++            PlaybackState state = c.getPlaybackState();  // read once: it can turn null between two calls
++            boolean playing = state != null && state.getState() == PlaybackState.STATE_PLAYING;
+             if (!playing || now.isEmpty() || isAppName(c.getPackageName(), now)) {
+                 main.removeCallbacks(save);
+                 title = "";
+@@ -65,6 +74,14 @@ public class WatchService extends NotificationListenerService {
+         }
+ 
+         void save() {
++            try {
++                saveNow();
++            } catch (RuntimeException e) {
++                Log.w("GlassRecent", "could not save the playing title", e);
++            }
++        }
++
++        private void saveNow() {
+             MediaMetadata m = c.getMetadata();
+             if (m == null || !title.equals(text(m, MediaMetadata.METADATA_KEY_DISPLAY_TITLE, MediaMetadata.METADATA_KEY_TITLE))) return;
+             String sub = text(m, MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE, MediaMetadata.METADATA_KEY_ARTIST,
 diff --git a/app/src/main/java/com/techpp/glass/Weather.java b/app/src/main/java/com/techpp/glass/Weather.java
 index fd8b153..bff3bc8 100644
 --- a/app/src/main/java/com/techpp/glass/Weather.java
